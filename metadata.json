@@ -1,0 +1,5 @@
+{
+  "name": "Trend Hunter",
+  "description": "A multi-source early-signal detector for unmet food demand, predicting culinary breakouts before they happen using AI and cross-platform signal analysis.",
+  "requestFramePermissions": []
+}
