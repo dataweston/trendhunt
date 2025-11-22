@@ -1,16 +1,19 @@
 import { Platform, TrendEntity } from './types';
+import { 
+  calculateDemandScore, 
+  calculateSupplyScore, 
+  calculateUnmetDemandScore, 
+  calculateBreakoutProbability 
+} from './utils/scoring';
 
-export const MOCK_TRENDS: TrendEntity[] = [
+// Raw data without the calculated scores
+const RAW_TRENDS: Omit<TrendEntity, 'supplyScore' | 'demandScore' | 'unmetDemandScore' | 'breakoutProbability'>[] = [
   {
     id: '1',
     term: 'Mochi Donuts',
     category: 'Bakery',
     region: 'Minneapolis–St Paul',
     neighborhood: 'North Loop',
-    supplyScore: 15,
-    demandScore: 88,
-    unmetDemandScore: 73,
-    breakoutProbability: 92,
     predictedBreakoutWeek: 4,
     signals: [
       {
@@ -45,10 +48,6 @@ export const MOCK_TRENDS: TrendEntity[] = [
     category: 'Mexican',
     region: 'Minneapolis–St Paul',
     neighborhood: 'Northeast',
-    supplyScore: 60,
-    demandScore: 75,
-    unmetDemandScore: 15,
-    breakoutProbability: 30,
     predictedBreakoutWeek: 0,
     signals: [
       {
@@ -77,10 +76,6 @@ export const MOCK_TRENDS: TrendEntity[] = [
     category: 'Pizza',
     region: 'Minneapolis–St Paul',
     neighborhood: 'Uptown',
-    supplyScore: 25,
-    demandScore: 65,
-    unmetDemandScore: 40,
-    breakoutProbability: 65,
     predictedBreakoutWeek: 8,
     signals: [
       {
@@ -103,10 +98,6 @@ export const MOCK_TRENDS: TrendEntity[] = [
     category: 'Street Food',
     region: 'Minneapolis–St Paul',
     neighborhood: 'Dinkytown',
-    supplyScore: 40,
-    demandScore: 85,
-    unmetDemandScore: 45,
-    breakoutProbability: 78,
     predictedBreakoutWeek: 3,
     signals: [
       {
@@ -123,10 +114,6 @@ export const MOCK_TRENDS: TrendEntity[] = [
     category: 'Cafe',
     region: 'Minneapolis–St Paul',
     neighborhood: 'Powderhorn',
-    supplyScore: 5,
-    demandScore: 55,
-    unmetDemandScore: 50,
-    breakoutProbability: 55,
     predictedBreakoutWeek: 10,
     signals: [
       {
@@ -138,6 +125,22 @@ export const MOCK_TRENDS: TrendEntity[] = [
     ]
   }
 ];
+
+// Dynamically calculate scores based on signal data
+export const MOCK_TRENDS: TrendEntity[] = RAW_TRENDS.map(trend => {
+  const demandScore = calculateDemandScore(trend.signals);
+  const supplyScore = calculateSupplyScore(trend.signals);
+  const unmetDemandScore = calculateUnmetDemandScore(demandScore, supplyScore);
+  const breakoutProbability = calculateBreakoutProbability(trend.signals);
+
+  return {
+    ...trend,
+    demandScore,
+    supplyScore,
+    unmetDemandScore,
+    breakoutProbability
+  } as TrendEntity;
+});
 
 export const PLATFORM_COLORS: Record<Platform, string> = {
   [Platform.Reddit]: '#FF4500',
