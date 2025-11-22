@@ -104,7 +104,7 @@ const App = () => {
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">High Probability Breakouts</div>
                   <div className="text-2xl font-bold text-emerald-400 mt-1">14</div>
-                  <div className="text-xs text-slate-500 mt-1">Probability > 70%</div>
+                  <div className="text-xs text-slate-500 mt-1">Probability &gt; 70%</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">Avg Unmet Demand</div>

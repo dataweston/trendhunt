@@ -62,6 +62,20 @@ interface PropagationGraphProps {
   trends: TrendEntity[];
 }
 
+// Define a Node interface that extends d3.SimulationNodeDatum
+interface NetworkNode extends d3.SimulationNodeDatum {
+  id: Platform;
+  group: number;
+  r: number;
+}
+
+// Define Link interface to handle D3 mutations
+interface NetworkLink extends d3.SimulationLinkDatum<NetworkNode> {
+  source: string | NetworkNode;
+  target: string | NetworkNode;
+  value: number;
+}
+
 export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -75,7 +89,7 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
     svg.selectAll("*").remove();
 
     // Define nodes (Platforms)
-    const nodes = [
+    const nodes: NetworkNode[] = [
       { id: Platform.TikTok, group: 1, r: 25 },
       { id: Platform.Pinterest, group: 1, r: 20 },
       { id: Platform.Reddit, group: 2, r: 22 },
@@ -85,7 +99,8 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
     ];
 
     // Define links (Influence Flow)
-    const links = [
+    // We cast this to allow D3 to replace string IDs with Node objects
+    const links: NetworkLink[] = [
       { source: Platform.TikTok, target: Platform.GoogleSearch, value: 5 },
       { source: Platform.TikTok, target: Platform.DoorDash, value: 2 },
       { source: Platform.Reddit, target: Platform.GoogleSearch, value: 4 },
@@ -94,8 +109,8 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
       { source: Platform.Pinterest, target: Platform.GoogleSearch, value: 3 },
     ];
 
-    const simulation = d3.forceSimulation(nodes as any)
-      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(100))
+    const simulation = d3.forceSimulation<NetworkNode>(nodes)
+      .force("link", d3.forceLink<NetworkNode, NetworkLink>(links).id((d) => d.id).distance(100))
       .force("charge", d3.forceManyBody().strength(-400))
       .force("center", d3.forceCenter(width / 2, height / 2));
 
@@ -131,7 +146,7 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
       .join("circle")
       .attr("r", d => d.r)
       .attr("fill", d => PLATFORM_COLORS[d.id as Platform] || "#94a3b8")
-      .call(d3.drag<any, any>()
+      .call(d3.drag<SVGCircleElement, NetworkNode>()
         .on("start", dragstarted)
         .on("drag", dragged)
         .on("end", dragended));
@@ -151,32 +166,32 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
 
     simulation.on("tick", () => {
       link
-        .attr("x1", d => (d.source as any).x)
-        .attr("y1", d => (d.source as any).y)
-        .attr("x2", d => (d.target as any).x)
-        .attr("y2", d => (d.target as any).y);
+        .attr("x1", d => (d.source as NetworkNode).x!)
+        .attr("y1", d => (d.source as NetworkNode).y!)
+        .attr("x2", d => (d.target as NetworkNode).x!)
+        .attr("y2", d => (d.target as NetworkNode).y!);
 
       node
-        .attr("cx", d => d.x)
-        .attr("cy", d => d.y);
+        .attr("cx", d => d.x!)
+        .attr("cy", d => d.y!);
         
       label
-        .attr("x", d => d.x)
-        .attr("y", d => d.y);
+        .attr("x", d => d.x!)
+        .attr("y", d => d.y!);
     });
 
-    function dragstarted(event: any, d: any) {
+    function dragstarted(event: d3.D3DragEvent<SVGCircleElement, NetworkNode, NetworkNode>, d: NetworkNode) {
       if (!event.active) simulation.alphaTarget(0.3).restart();
       d.fx = d.x;
       d.fy = d.y;
     }
 
-    function dragged(event: any, d: any) {
+    function dragged(event: d3.D3DragEvent<SVGCircleElement, NetworkNode, NetworkNode>, d: NetworkNode) {
       d.fx = event.x;
       d.fy = event.y;
     }
 
-    function dragended(event: any, d: any) {
+    function dragended(event: d3.D3DragEvent<SVGCircleElement, NetworkNode, NetworkNode>, d: NetworkNode) {
       if (!event.active) simulation.alphaTarget(0);
       d.fx = null;
       d.fy = null;
