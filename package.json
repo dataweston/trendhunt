@@ -14,7 +14,9 @@
     "@google/genai": "^1.30.0",
     "lucide-react": "^0.554.0",
     "recharts": "^3.4.1",
-    "d3": "^7.9.0"
+    "d3": "^7.9.0",
+    "axios": "^1.6.0",
+    "google-trends-api": "^4.9.2"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

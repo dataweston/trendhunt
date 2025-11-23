@@ -1,21 +1,37 @@
-import React, { useState } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell } from 'lucide-react';
-import { MOCK_TRENDS } from './constants';
+import React, { useState, useEffect } from 'react';
+import { LayoutDashboard, Map, Activity, Search, Bell, Loader2 } from 'lucide-react';
+import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
 import { OpportunityTable } from './components/OpportunityTable';
 import { TrendDetail } from './components/TrendDetail';
 import { TrendTimeSeries, PropagationGraph, GeoHexMap } from './components/Visualizations';
 
 const App = () => {
+  const [trends, setTrends] = useState<TrendEntity[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedTrend, setSelectedTrend] = useState<TrendEntity | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  const filteredTrends = MOCK_TRENDS.filter(t => 
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const data = await trendService.getTrends();
+        setTrends(data);
+      } catch (error) {
+        console.error("Failed to fetch trends", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
+  }, []);
+
+  const filteredTrends = trends.filter(t => 
     t.term.toLowerCase().includes(searchTerm.toLowerCase()) || 
     t.category.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const activeAlerts = MOCK_TRENDS.filter(t => t.breakoutProbability > 75).length;
+  const activeAlerts = trends.filter(t => t.breakoutProbability > 75).length;
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-200 flex">
@@ -127,8 +143,19 @@ const App = () => {
                   
                   {/* Featured Analysis */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <PropagationGraph trends={MOCK_TRENDS} />
-                      <GeoHexMap />
+                      {loading ? (
+                        <div className="col-span-2 h-64 flex items-center justify-center bg-slate-800/20 rounded-xl border border-slate-700 border-dashed">
+                          <div className="flex flex-col items-center gap-2 text-slate-500">
+                            <Loader2 className="animate-spin" size={32} />
+                            <span>Loading Live Signals...</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <PropagationGraph trends={trends} />
+                          <GeoHexMap />
+                        </>
+                      )}
                   </div>
               </div>
 

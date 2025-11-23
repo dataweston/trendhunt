@@ -4,7 +4,9 @@ export enum Platform {
   GoogleSearch = 'GoogleSearch',
   Yelp = 'Yelp',
   DoorDash = 'DoorDash',
-  Pinterest = 'Pinterest'
+  Pinterest = 'Pinterest',
+  RedditPushshift = 'RedditPushshift',
+  Wildchat = 'Wildchat'
 }
 
 export interface TimeSeriesPoint {

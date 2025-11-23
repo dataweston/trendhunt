@@ -144,9 +144,11 @@ export const MOCK_TRENDS: TrendEntity[] = RAW_TRENDS.map(trend => {
 
 export const PLATFORM_COLORS: Record<Platform, string> = {
   [Platform.Reddit]: '#FF4500',
-  [Platform.TikTok]: '#00f2ea', // Cyan/Pink usually, simplified to Cyan for contrast
+  [Platform.TikTok]: '#00f2ea',
   [Platform.GoogleSearch]: '#4285F4',
   [Platform.Yelp]: '#FF1A1A',
   [Platform.DoorDash]: '#eb1700',
-  [Platform.Pinterest]: '#E60023'
+  [Platform.Pinterest]: '#E60023',
+  [Platform.RedditPushshift]: '#FF5700', // Slightly different Reddit orange
+  [Platform.Wildchat]: '#f1c40f', // Yellow
 };
