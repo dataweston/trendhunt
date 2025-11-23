@@ -358,11 +358,75 @@ async function fetchWildchatData(term: string): Promise<SignalData> {
 
 // --- Discovery Agent ---
 
+async function discoverRelatedQueries() {
+  if (!supabase) return;
+
+  // We only check the first few terms to avoid rate limits
+  const seedTerms = TERMS_TO_TRACK.slice(0, 2); 
+
+  for (const item of seedTerms) {
+    try {
+      const results = await googleTrends.relatedQueries({ keyword: item.term });
+      const data = JSON.parse(results);
+      
+      // Extract "Rising" queries (breakout trends)
+      const rising = data.default.rankedList.find((l: any) => l.title === 'Rising');
+      if (rising && rising.rankedKeyword) {
+        for (const query of rising.rankedKeyword) {
+          // query: { query: 'birria tacos recipe', value: 150, formattedValue: '+150%' }
+          const term = query.query;
+          const score = query.value; // % increase
+
+          // Filter out the term itself
+          if (term.toLowerCase().includes(item.term.toLowerCase())) continue;
+
+          await queueDiscovery(term, `Google Trends Rising (via ${item.term})`, score);
+        }
+      }
+    } catch (error) {
+      // console.error(`Google Trends Related Queries failed for ${item.term}`);
+    }
+  }
+}
+
+async function queueDiscovery(term: string, source: string, score: number) {
+  if (!supabase) return;
+
+  // Check if exists in trends (already tracked)
+  const { data: existingTrend } = await supabase
+    .from('trends')
+    .select('id')
+    .eq('term', term)
+    .maybeSingle();
+
+  if (!existingTrend) {
+    // Check if already in queue
+    const { data: existingQueue } = await supabase
+      .from('discovery_queue')
+      .select('id')
+      .eq('term', term)
+      .maybeSingle();
+
+    if (!existingQueue) {
+        await supabase.from('discovery_queue').insert({
+          term: term,
+          source: source,
+          initial_score: score,
+          status: 'pending'
+        });
+        console.log(`Queued new discovery: ${term}`);
+    }
+  }
+}
+
 async function discoverAndQueueTrends() {
   if (!supabase) return;
 
   try {
-    // 1. Source: Reddit Local Subs (Minneapolis, TwinCities)
+    // 1. Google Trends Related Queries (New)
+    await discoverRelatedQueries();
+
+    // 2. Source: Reddit Local Subs (Minneapolis, TwinCities)
     const subreddits = ['Minneapolis', 'TwinCities'];
     const keywords = ['food', 'eat', 'restaurant', 'drink', 'coffee', 'pizza', 'taco', 'burger', 'sushi', 'bakery', 'tried', 'best', 'opening', 'new'];
     
@@ -387,33 +451,9 @@ async function discoverAndQueueTrends() {
       }
     }
 
-    // 2. Insert into Supabase Discovery Queue
+    // 3. Insert into Supabase Discovery Queue
     for (const item of potentialTerms) {
-      // Check if exists in trends (already tracked)
-      const { data: existingTrend } = await supabase
-        .from('trends')
-        .select('id')
-        .eq('term', item.term)
-        .maybeSingle();
-
-      if (!existingTrend) {
-        // Check if already in queue to avoid duplicates
-        const { data: existingQueue } = await supabase
-          .from('discovery_queue')
-          .select('id')
-          .eq('term', item.term)
-          .maybeSingle();
-
-        if (!existingQueue) {
-            await supabase.from('discovery_queue').insert({
-              term: item.term,
-              source: item.source,
-              initial_score: item.score,
-              status: 'pending'
-            });
-            console.log(`Queued new discovery: ${item.term}`);
-        }
-      }
+      await queueDiscovery(item.term, item.source, item.score);
     }
   } catch (error) {
     console.error('Discovery Agent failed:', error);
