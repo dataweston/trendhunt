@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell, Loader2 } from 'lucide-react';
+import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle } from 'lucide-react';
 import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
 import { OpportunityTable } from './components/OpportunityTable';
 import { TrendDetail } from './components/TrendDetail';
-import { TrendTimeSeries, PropagationGraph, GeoHexMap } from './components/Visualizations';
+import { TrendTimeSeries, PropagationGraph, GeoMap } from './components/Visualizations';
 
 const App = () => {
   const [trends, setTrends] = useState<TrendEntity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedTrend, setSelectedTrend] = useState<TrendEntity | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -17,8 +18,10 @@ const App = () => {
       try {
         const data = await trendService.getTrends();
         setTrends(data);
+        setError(null);
       } catch (error) {
         console.error("Failed to fetch trends", error);
+        setError("Failed to load trend data. Please check your connection or API keys.");
       } finally {
         setLoading(false);
       }
@@ -110,6 +113,13 @@ const App = () => {
         {/* Dashboard Scroll Area */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
            
+           {error && (
+             <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-lg flex items-center gap-3">
+                <AlertCircle size={20} />
+                <span>{error}</span>
+             </div>
+           )}
+
            {/* KPI Cards */}
            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
@@ -153,7 +163,7 @@ const App = () => {
                       ) : (
                         <>
                           <PropagationGraph trends={trends} />
-                          <GeoHexMap />
+                          <GeoMap trends={trends} />
                         </>
                       )}
                   </div>

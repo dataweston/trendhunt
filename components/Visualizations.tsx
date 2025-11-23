@@ -209,42 +209,9 @@ export const PropagationGraph: React.FC<PropagationGraphProps> = () => {
 
 // --- Abstract Geo Map (Hex Grid style) ---
 export const GeoHexMap: React.FC = () => {
-    // Mock grid for Minneapolis neighborhoods
-    const grid = [
-      { id: 'nl', x: 2, y: 1, name: 'North Loop', intensity: 0.9 },
-      { id: 'ne', x: 3, y: 1, name: 'Northeast', intensity: 0.7 },
-      { id: 'dt', x: 2, y: 2, name: 'Downtown', intensity: 0.4 },
-      { id: 'up', x: 1, y: 3, name: 'Uptown', intensity: 0.6 },
-      { id: 'wh', x: 2, y: 3, name: 'Whittier', intensity: 0.5 },
-      { id: 'ph', x: 3, y: 3, name: 'Powderhorn', intensity: 0.3 },
-      { id: 'dk', x: 3, y: 2, name: 'Dinkytown', intensity: 0.8 },
-    ];
-
-    return (
-      <div className="h-[300px] w-full bg-slate-800/50 rounded-lg border border-slate-700 relative flex items-center justify-center">
-        <h3 className="absolute top-4 left-4 text-sm font-medium text-slate-400">Unmet Demand Hotspots</h3>
-        <div className="relative w-64 h-64">
-            {grid.map((cell) => (
-                <div
-                    key={cell.id}
-                    className="absolute w-16 h-16 border border-slate-900 flex items-center justify-center text-[10px] text-center font-bold text-white cursor-pointer hover:scale-110 transition-transform rounded-lg shadow-lg"
-                    style={{
-                        left: `${cell.x * 60}px`,
-                        top: `${cell.y * 60}px`,
-                        backgroundColor: `rgba(239, 68, 68, ${cell.intensity})`, // Red opacity based on demand intensity
-                    }}
-                    title={`${cell.name}: ${(cell.intensity * 100).toFixed(0)}% Unmet Demand`}
-                >
-                    {cell.name}
-                </div>
-            ))}
-        </div>
-        <div className="absolute bottom-4 right-4 flex items-center space-x-2">
-            <div className="w-3 h-3 bg-red-500/20 rounded"></div>
-            <span className="text-xs text-slate-400">Low</span>
-            <div className="w-3 h-3 bg-red-500 rounded"></div>
-            <span className="text-xs text-slate-400">High</span>
-        </div>
-      </div>
-    );
+    // This component is now deprecated in favor of the real Leaflet map
+    // But we keep the export to avoid breaking imports if used elsewhere temporarily
+    return null; 
 };
+
+export { GeoMap } from './GeoMap';

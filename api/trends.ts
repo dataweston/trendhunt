@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 // @ts-ignore
 import googleTrends from 'google-trends-api';
+import { createClient } from '@supabase/supabase-js';
 
 // --- Types (Duplicated to ensure standalone execution) ---
 enum Platform {
@@ -48,6 +49,13 @@ const TERMS_TO_TRACK = [
 const REGION = 'Minneapolis';
 const YELP_API_KEY = process.env.YELP_API_KEY;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+// Initialize Supabase
+const supabase = (SUPABASE_URL && SUPABASE_KEY) 
+  ? createClient(SUPABASE_URL, SUPABASE_KEY) 
+  : null;
 
 // --- Scoring Logic ---
 const calculateDemandScore = (signals: SignalData[]): number => {
@@ -348,6 +356,70 @@ async function fetchWildchatData(term: string): Promise<SignalData> {
   }
 }
 
+// --- Discovery Agent ---
+
+async function discoverAndQueueTrends() {
+  if (!supabase) return;
+
+  try {
+    // 1. Source: Reddit Local Subs (Minneapolis, TwinCities)
+    const subreddits = ['Minneapolis', 'TwinCities'];
+    const keywords = ['food', 'eat', 'restaurant', 'drink', 'coffee', 'pizza', 'taco', 'burger', 'sushi', 'bakery', 'tried', 'best', 'opening', 'new'];
+    
+    const potentialTerms: { term: string; source: string; score: number }[] = [];
+
+    for (const sub of subreddits) {
+      try {
+        const response = await axios.get(`https://www.reddit.com/r/${sub}/hot.json?limit=10`);
+        const posts = response.data.data.children;
+
+        for (const post of posts) {
+          const title = post.data.title;
+          const lowerTitle = title.toLowerCase();
+          
+          if (keywords.some(k => lowerTitle.includes(k))) {
+             const term = title.length > 100 ? title.substring(0, 97) + '...' : title;
+             potentialTerms.push({ term, source: `Reddit r/${sub}`, score: post.data.score });
+          }
+        }
+      } catch (e) {
+        console.error(`Failed to fetch from r/${sub}`, e);
+      }
+    }
+
+    // 2. Insert into Supabase Discovery Queue
+    for (const item of potentialTerms) {
+      // Check if exists in trends (already tracked)
+      const { data: existingTrend } = await supabase
+        .from('trends')
+        .select('id')
+        .eq('term', item.term)
+        .maybeSingle();
+
+      if (!existingTrend) {
+        // Check if already in queue to avoid duplicates
+        const { data: existingQueue } = await supabase
+          .from('discovery_queue')
+          .select('id')
+          .eq('term', item.term)
+          .maybeSingle();
+
+        if (!existingQueue) {
+            await supabase.from('discovery_queue').insert({
+              term: item.term,
+              source: item.source,
+              initial_score: item.score,
+              status: 'pending'
+            });
+            console.log(`Queued new discovery: ${item.term}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Discovery Agent failed:', error);
+  }
+}
+
 // --- Main Handler ---
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -366,6 +438,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    // Run Discovery Agent in background (awaiting to ensure completion in serverless)
+    if (supabase) {
+        await discoverAndQueueTrends();
+    }
+
     const trends: TrendEntity[] = await Promise.all(TERMS_TO_TRACK.map(async (item, index) => {
       const [yelp, reddit, google, tiktok, pinterest, delivery, pushshift, wildchat, googlePlaces] = await Promise.all([
         fetchYelpData(item.term, REGION),
@@ -385,8 +462,47 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const unmetDemandScore = calculateUnmetDemandScore(demandScore, supplyScore);
       const breakoutProbability = calculateBreakoutProbability(signals);
 
+      // --- Supabase Persistence ---
+      if (supabase) {
+        try {
+          // 1. Upsert Trend Entity
+          const { data: trendData, error: trendError } = await supabase
+            .from('trends')
+            .upsert({ 
+              term: item.term,
+              category: item.category,
+              region: 'Minneapolis–St Paul',
+              neighborhood: item.neighborhood,
+              last_updated: new Date().toISOString()
+            }, { onConflict: 'term' })
+            .select()
+            .single();
+
+          if (trendError) {
+             console.error('Supabase Trend Upsert Error:', trendError);
+          } else if (trendData) {
+             // 2. Insert History Record
+             const { error: historyError } = await supabase
+               .from('trend_history')
+               .insert({
+                 trend_id: trendData.id,
+                 timestamp: new Date().toISOString(),
+                 demand_score: demandScore,
+                 supply_score: supplyScore,
+                 unmet_demand_score: unmetDemandScore,
+                 breakout_probability: breakoutProbability,
+                 raw_signals: signals
+               });
+             
+             if (historyError) console.error('Supabase History Insert Error:', historyError);
+          }
+        } catch (dbError) {
+          console.error('Supabase Operation Failed:', dbError);
+        }
+      }
+
       return {
-        id: String(index + 1),
+        id: String(index + 1), // In a real app, use the UUID from Supabase
         term: item.term,
         category: item.category,
         region: 'Minneapolis–St Paul',
