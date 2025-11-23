@@ -419,14 +419,49 @@ async function queueDiscovery(term: string, source: string, score: number) {
   }
 }
 
+async function discoverYelpHotAndNew() {
+  if (!YELP_API_KEY || !supabase) return;
+
+  try {
+    const response = await axios.get('https://api.yelp.com/v3/businesses/search', {
+      headers: { Authorization: `Bearer ${YELP_API_KEY}` },
+      params: { 
+        location: REGION, 
+        attributes: 'hot_and_new', 
+        limit: 20,
+        categories: 'food,restaurants'
+      }
+    });
+
+    const businesses = response.data.businesses || [];
+    
+    for (const b of businesses) {
+      // 1. Add the Business Category as a trend (e.g., "Hand Roll Bar")
+      for (const cat of b.categories) {
+        await queueDiscovery(cat.title, `Yelp Hot & New (Category)`, 50);
+      }
+      
+      // 2. Add the Business Name itself if it's very unique? 
+      // No, we track "Trends" (concepts), not specific restaurants usually.
+      // But sometimes a specific dish is mentioned in reviews. 
+      // For now, categories are the safest bet for "Trends".
+    }
+  } catch (error) {
+    console.error('Yelp Discovery failed', error);
+  }
+}
+
 async function discoverAndQueueTrends() {
   if (!supabase) return;
 
   try {
-    // 1. Google Trends Related Queries (New)
+    // 1. Yelp Hot & New (Local Supply Signals)
+    await discoverYelpHotAndNew();
+
+    // 2. Google Trends Related Queries (New)
     await discoverRelatedQueries();
 
-    // 2. Source: Reddit Local Subs (Minneapolis, TwinCities)
+    // 3. Source: Reddit Local Subs (Minneapolis, TwinCities)
     const subreddits = ['Minneapolis', 'TwinCities'];
     const keywords = ['food', 'eat', 'restaurant', 'drink', 'coffee', 'pizza', 'taco', 'burger', 'sushi', 'bakery', 'tried', 'best', 'opening', 'new'];
     
