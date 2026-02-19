@@ -4,9 +4,31 @@
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/*.ts": {
+    "api/trends.ts": {
       "memory": 1024,
+      "maxDuration": 30
+    },
+    "api/discover.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/queue.ts": {
+      "memory": 256,
       "maxDuration": 10
+    },
+    "api/generate-page.ts": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/meta-ads.ts": {
+      "memory": 512,
+      "maxDuration": 15
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/discover",
+      "schedule": "0 6 * * *"
+    }
+  ]
 }

@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox } from 'lucide-react';
 import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
 import { OpportunityTable } from './components/OpportunityTable';
 import { TrendDetail } from './components/TrendDetail';
 import { TrendTimeSeries, PropagationGraph, GeoMap } from './components/Visualizations';
+import { DiscoveryQueue } from './components/DiscoveryQueue';
 
 const App = () => {
   const [trends, setTrends] = useState<TrendEntity[]>([]);
@@ -12,22 +13,23 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedTrend, setSelectedTrend] = useState<TrendEntity | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue'>('dashboard');
 
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const data = await trendService.getTrends();
-        setTrends(data);
-        setError(null);
-      } catch (error) {
-        console.error("Failed to fetch trends", error);
-        setError("Failed to load trend data. Please check your connection or API keys.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadData();
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await trendService.getTrends();
+      setTrends(data);
+      setError(null);
+    } catch (error) {
+      console.error("Failed to fetch trends", error);
+      setError("Failed to load trend data. Please check your connection or API keys.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filteredTrends = trends.filter(t => 
     t.term.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -50,14 +52,18 @@ const App = () => {
         </div>
         
         <nav className="flex-1 p-4 space-y-2">
-          <div className="flex items-center gap-3 px-4 py-3 bg-slate-800/50 text-white rounded-lg border border-slate-700 shadow-sm cursor-pointer">
+          <button onClick={() => setActiveNav('dashboard')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'dashboard' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
             <LayoutDashboard size={18} />
             <span className="font-medium">Dashboard</span>
-          </div>
-          <div className="flex items-center gap-3 px-4 py-3 text-slate-400 hover:bg-slate-800/30 hover:text-slate-200 rounded-lg cursor-pointer transition-colors">
+          </button>
+          <button onClick={() => setActiveNav('geo')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'geo' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
             <Map size={18} />
             <span className="font-medium">Geospatial</span>
-          </div>
+          </button>
+          <button onClick={() => setActiveNav('queue')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'queue' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
+            <Inbox size={18} />
+            <span className="font-medium">Discovery Queue</span>
+          </button>
           <div className="flex items-center gap-3 px-4 py-3 text-slate-400 hover:bg-slate-800/30 hover:text-slate-200 rounded-lg cursor-pointer transition-colors">
             <Bell size={18} />
             <span className="font-medium">Alerts</span>
@@ -110,37 +116,46 @@ const App = () => {
            </div>
         </header>
 
-        {/* Dashboard Scroll Area */}
+        {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-           
-           {error && (
+
+           {activeNav === 'queue' && (
+             <div className="max-w-2xl">
+               <h2 className="text-xl font-bold text-white mb-4">Discovery Queue</h2>
+               <p className="text-sm text-slate-400 mb-6">Terms discovered automatically from Yelp, Google Trends, and Reddit. Approve to start tracking.</p>
+               <DiscoveryQueue onApproved={loadData} />
+             </div>
+           )}
+
+           {activeNav === 'dashboard' && error && (
              <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-lg flex items-center gap-3">
                 <AlertCircle size={20} />
                 <span>{error}</span>
              </div>
            )}
 
+           {activeNav === 'dashboard' && (<>
            {/* KPI Cards */}
            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Total Monitored Entities</div>
-                  <div className="text-2xl font-bold text-white mt-1">482</div>
-                  <div className="text-xs text-emerald-400 mt-1">+12 this week</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase">Tracked Terms</div>
+                  <div className="text-2xl font-bold text-white mt-1">{trends.length}</div>
+                  <div className="text-xs text-emerald-400 mt-1">Live</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">High Probability Breakouts</div>
-                  <div className="text-2xl font-bold text-emerald-400 mt-1">14</div>
+                  <div className="text-2xl font-bold text-emerald-400 mt-1">{trends.filter(t => t.breakoutProbability > 70).length}</div>
                   <div className="text-xs text-slate-500 mt-1">Probability &gt; 70%</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">Avg Unmet Demand</div>
-                  <div className="text-2xl font-bold text-orange-400 mt-1">42/100</div>
+                  <div className="text-2xl font-bold text-orange-400 mt-1">{trends.length > 0 ? Math.round(trends.reduce((a, t) => a + t.unmetDemandScore, 0) / trends.length) : 0}/100</div>
                   <div className="text-xs text-slate-500 mt-1">Regional Average</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Supply Gap</div>
-                  <div className="text-2xl font-bold text-red-400 mt-1">High</div>
-                  <div className="text-xs text-slate-500 mt-1">Northeast District</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase">Top Gap</div>
+                  <div className="text-2xl font-bold text-red-400 mt-1">{trends.length > 0 ? [...trends].sort((a, b) => b.unmetDemandScore - a.unmetDemandScore)[0]?.neighborhood : '—'}</div>
+                  <div className="text-xs text-slate-500 mt-1">{trends.length > 0 ? [...trends].sort((a, b) => b.unmetDemandScore - a.unmetDemandScore)[0]?.term : ''}</div>
               </div>
            </div>
 
@@ -202,6 +217,18 @@ const App = () => {
                  </div>
               </div>
            </div>
+           </>)}
+
+           {activeNav === 'geo' && (
+             <div className="h-full">
+               <h2 className="text-xl font-bold text-white mb-4">Geospatial View</h2>
+               {loading ? (
+                 <div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>
+               ) : (
+                 <GeoMap trends={trends} />
+               )}
+             </div>
+           )}
 
         </div>
       </main>

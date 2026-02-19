@@ -1,0 +1,157 @@
+/**
+ * Product Page Draft Generator
+ * POST /api/generate-page { trendId }
+ * Uses Gemini to generate a product page draft, saves to Supabase.
+ * Optionally pushes to Sanity CMS if configured.
+ */
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { createClient } from '@supabase/supabase-js';
+import { GoogleGenAI, Type } from '@google/genai';
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const GEMINI_API_KEY = process.env.API_KEY;
+const SANITY_PROJECT_ID = process.env.SANITY_PROJECT_ID;
+const SANITY_TOKEN = process.env.SANITY_TOKEN;
+const SANITY_DATASET = process.env.SANITY_DATASET || 'production';
+
+const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+
+  if (!supabase || !ai) return res.status(500).json({ error: 'Missing config' });
+
+  const { trendId } = req.body || {};
+  if (!trendId) return res.status(400).json({ error: 'trendId required' });
+
+  try {
+    // Get trend data
+    const { data: trend } = await supabase.from('trends').select('*').eq('id', trendId).single();
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+
+    // Get latest scores
+    const { data: latest } = await supabase
+      .from('trend_history')
+      .select('demand_score, supply_score, unmet_demand_score, breakout_probability')
+      .eq('trend_id', trendId)
+      .order('timestamp', { ascending: false })
+      .limit(1)
+      .single();
+
+    const scores = latest || { demand_score: 0, supply_score: 0, unmet_demand_score: 0, breakout_probability: 0 };
+
+    // Generate with Gemini
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `You are a copywriter for Local Effort, a Minneapolis-based food company that does private chef dinners, weekly meal prep, and local food products. Generate a product page for a new offering based on this trending food concept:
+
+Term: ${trend.term}
+Category: ${trend.category}
+Neighborhood demand: ${trend.neighborhood}
+Demand score: ${scores.demand_score}/100
+Supply gap: ${scores.unmet_demand_score}/100
+
+The page should feel artisanal, local, and seasonal. Local Effort sources 100% locally in Minnesota. The tone is warm but confident — like a chef who knows their craft.
+
+Generate:
+1. A page title (short, compelling)
+2. A subtitle/tagline
+3. A product description (2-3 paragraphs, focusing on sourcing, craft, and the dining experience)
+4. SEO meta title (under 60 chars)
+5. SEO meta description (under 155 chars)
+6. 5 SEO keywords
+7. A suggested price point in dollars (based on Local Effort's range: $65-85/person for dinners, $12-25 for individual items)`,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            subtitle: { type: Type.STRING },
+            description: { type: Type.STRING },
+            seoTitle: { type: Type.STRING },
+            seoDescription: { type: Type.STRING },
+            seoKeywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+            suggestedPrice: { type: Type.NUMBER },
+          },
+        },
+      },
+    });
+
+    if (!response.text) return res.status(500).json({ error: 'Gemini returned empty' });
+
+    const generated = JSON.parse(response.text);
+
+    // Save draft to Supabase (new table: page_drafts)
+    // First ensure the table exists — if not, we store in a JSON column on trends
+    const draft = {
+      trend_id: trendId,
+      trend_term: trend.term,
+      title: generated.title,
+      subtitle: generated.subtitle,
+      description: generated.description,
+      seo_title: generated.seoTitle,
+      seo_description: generated.seoDescription,
+      seo_keywords: generated.seoKeywords,
+      suggested_price: generated.suggestedPrice,
+      status: 'draft',
+      created_at: new Date().toISOString(),
+    };
+
+    // Try page_drafts table, fall back to updating trend metadata
+    const { data: saved, error: saveError } = await supabase
+      .from('page_drafts')
+      .insert(draft)
+      .select()
+      .single();
+
+    if (saveError) {
+      // Table might not exist yet — store on trend record as metadata
+      console.warn('page_drafts table not found, storing on trend:', saveError.message);
+      await supabase.from('trends').update({ page_draft: draft }).eq('id', trendId);
+      return res.status(200).json({ ok: true, draft, stored: 'trend_metadata' });
+    }
+
+    // Optionally push to Sanity CMS
+    if (SANITY_PROJECT_ID && SANITY_TOKEN) {
+      try {
+        const sanityDoc = {
+          _type: 'productPage',
+          title: generated.title,
+          slug: { _type: 'slug', current: trend.term.toLowerCase().replace(/\s+/g, '-') },
+          subtitle: generated.subtitle,
+          description: generated.description,
+          seoTitle: generated.seoTitle,
+          seoDescription: generated.seoDescription,
+          status: 'draft',
+          trendSource: trend.term,
+          suggestedPrice: generated.suggestedPrice,
+        };
+
+        await fetch(`https://${SANITY_PROJECT_ID}.api.sanity.io/v2024-01-01/data/mutate/${SANITY_DATASET}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${SANITY_TOKEN}`,
+          },
+          body: JSON.stringify({
+            mutations: [{ createOrReplace: { ...sanityDoc, _id: `trend-page-${trendId}` } }],
+          }),
+        });
+      } catch (e) {
+        console.error('Sanity push failed (non-fatal):', e);
+      }
+    }
+
+    return res.status(200).json({ ok: true, draft: saved || draft });
+  } catch (error) {
+    console.error('Generate page error:', error);
+    return res.status(500).json({ error: 'Failed to generate page' });
+  }
+}

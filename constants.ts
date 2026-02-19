@@ -149,6 +149,9 @@ export const PLATFORM_COLORS: Record<Platform, string> = {
   [Platform.Yelp]: '#FF1A1A',
   [Platform.DoorDash]: '#eb1700',
   [Platform.Pinterest]: '#E60023',
-  [Platform.RedditPushshift]: '#FF5700', // Slightly different Reddit orange
-  [Platform.Wildchat]: '#f1c40f', // Yellow
+  [Platform.RedditPushshift]: '#FF5700',
+  [Platform.Wildchat]: '#f1c40f',
+  [Platform.OwnSales]: '#10b981',
+  [Platform.OwnTraffic]: '#8b5cf6',
+  [Platform.MetaAds]: '#3b82f6',
 };

@@ -6,7 +6,10 @@ export enum Platform {
   DoorDash = 'DoorDash',
   Pinterest = 'Pinterest',
   RedditPushshift = 'RedditPushshift',
-  Wildchat = 'Wildchat'
+  Wildchat = 'Wildchat',
+  OwnSales = 'OwnSales',
+  OwnTraffic = 'OwnTraffic',
+  MetaAds = 'MetaAds',
 }
 
 export interface TimeSeriesPoint {
@@ -47,4 +50,24 @@ export interface AnalysisResult {
   summary: string;
   recommendation: string;
   riskAssessment: string;
+}
+
+export interface DiscoveryQueueItem {
+  id: string;
+  term: string;
+  source: string;
+  initial_score: number;
+  status: 'pending' | 'approved' | 'rejected';
+  created_at: string;
+}
+
+export interface ProductPageDraft {
+  id: string;
+  trendTerm: string;
+  title: string;
+  description: string;
+  seoMeta: { title: string; description: string; keywords: string[] };
+  suggestedPrice?: number;
+  status: 'draft' | 'review' | 'published';
+  createdAt: string;
 }

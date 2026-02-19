@@ -2,7 +2,7 @@
 create extension if not exists "uuid-ossp";
 
 -- Trends Table: Stores the entities we are tracking
-create table trends (
+create table if not exists trends (
   id uuid default uuid_generate_v4() primary key,
   term text not null unique,
   category text,
@@ -13,7 +13,7 @@ create table trends (
 );
 
 -- Trend History Table: Stores the daily/hourly scores for velocity calculation
-create table trend_history (
+create table if not exists trend_history (
   id uuid default uuid_generate_v4() primary key,
   trend_id uuid references trends(id) on delete cascade,
   timestamp timestamp with time zone default timezone('utc'::text, now()) not null,
@@ -24,8 +24,22 @@ create table trend_history (
   raw_signals jsonb -- Store the raw signal data (Reddit count, etc.) for debugging
 );
 
+-- Page Drafts: AI-generated product page content
+create table if not exists page_drafts (
+  id uuid default uuid_generate_v4() primary key,
+  trend_id uuid references trends(id) on delete cascade,
+  title text,
+  subtitle text,
+  description text,
+  seo_meta text,
+  keywords text[],
+  suggested_price text,
+  sanity_id text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
 -- Discovery Queue: Potential trends found by the agent, waiting for approval
-create table discovery_queue (
+create table if not exists discovery_queue (
   id uuid default uuid_generate_v4() primary key,
   term text not null,
   source text, -- e.g., "Reddit Rising", "Google Trends"

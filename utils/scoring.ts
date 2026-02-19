@@ -1,87 +1,124 @@
 import { SignalData, Platform } from '../types';
 
 const PLATFORM_WEIGHTS: Record<Platform, number> = {
-  [Platform.TikTok]: 2.0, // High viral potential (Demand)
-  [Platform.Reddit]: 1.5, // Community interest (Demand)
-  [Platform.Pinterest]: 1.2, // Visual interest (Demand)
-  [Platform.GoogleSearch]: 1.0, // General interest
-  [Platform.Yelp]: 0.5, // Established supply (Supply indicator)
-  [Platform.DoorDash]: 0.5 // Established supply (Supply indicator)
+  [Platform.OwnSales]: 3.0,     // Strongest signal: actual purchases
+  [Platform.TikTok]: 2.0,       // High viral potential (Demand)
+  [Platform.OwnTraffic]: 1.8,   // Your own page views
+  [Platform.Reddit]: 1.5,       // Community interest (Demand)
+  [Platform.Pinterest]: 1.2,    // Visual interest / planning (Demand)
+  [Platform.GoogleSearch]: 1.0,  // General intent
+  [Platform.MetaAds]: 0.8,      // Ad performance feedback
+  [Platform.Wildchat]: 0.6,     // LLM curiosity signal
+  [Platform.Yelp]: 0.5,         // Established supply (Supply indicator)
+  [Platform.DoorDash]: 0.5,     // Established supply (Supply indicator)
+  [Platform.RedditPushshift]: 0.3,
 };
 
+const SUPPLY_PLATFORMS = new Set<Platform>([
+  Platform.Yelp,
+  Platform.DoorDash,
+]);
+
+const DEMAND_PLATFORMS = new Set<Platform>([
+  Platform.OwnSales,
+  Platform.TikTok,
+  Platform.OwnTraffic,
+  Platform.Reddit,
+  Platform.Pinterest,
+  Platform.GoogleSearch,
+  Platform.MetaAds,
+  Platform.Wildchat,
+]);
+
 /**
- * Calculates the Demand Score based on weighted average of signal intensities.
- * Focuses on "Demand" platforms like TikTok, Reddit, Pinterest.
+ * Demand Score: weighted average of demand-side signal intensities.
  */
 export const calculateDemandScore = (signals: SignalData[]): number => {
   let totalWeightedScore = 0;
   let totalWeight = 0;
 
-  signals.forEach(signal => {
-    // Skip supply-heavy platforms for demand calculation or give them very low weight
-    // For this logic, we'll treat Yelp/DoorDash as purely supply signals
-    if (signal.platform === Platform.Yelp || signal.platform === Platform.DoorDash) return;
-
+  for (const signal of signals) {
+    if (!DEMAND_PLATFORMS.has(signal.platform)) continue;
     const weight = PLATFORM_WEIGHTS[signal.platform] || 1;
     totalWeightedScore += signal.currentIntensity * weight;
     totalWeight += weight;
-  });
+  }
 
   if (totalWeight === 0) return 0;
   return Math.min(100, Math.round(totalWeightedScore / totalWeight));
 };
 
 /**
- * Calculates the Supply Score based on presence in "Supply" platforms.
- * Uses Yelp, DoorDash, and GoogleSearch (as a proxy for business listings).
+ * Supply Score: average of supply-side signal intensities.
+ * Google Places count (stored as GoogleSearch from Places API) also counts as supply.
  */
 export const calculateSupplyScore = (signals: SignalData[]): number => {
-  const supplySignals = signals.filter(s => 
-    s.platform === Platform.Yelp || 
-    s.platform === Platform.DoorDash ||
-    s.platform === Platform.GoogleSearch
-  );
-
-  if (supplySignals.length === 0) return 10; // Baseline low supply
-
-  // Simple average of supply signal intensities
-  const avgIntensity = supplySignals.reduce((acc, curr) => acc + curr.currentIntensity, 0) / supplySignals.length;
-  return Math.min(100, Math.round(avgIntensity));
+  const supplySignals = signals.filter(s => SUPPLY_PLATFORMS.has(s.platform));
+  if (supplySignals.length === 0) return 10; // baseline low supply
+  const avg = supplySignals.reduce((acc, s) => acc + s.currentIntensity, 0) / supplySignals.length;
+  return Math.min(100, Math.round(avg));
 };
 
 /**
- * Calculates Unmet Demand Score: Demand - Supply.
+ * Unmet Demand = Demand - discounted Supply. Clamped [0, 100].
  */
 export const calculateUnmetDemandScore = (demand: number, supply: number): number => {
-  // If demand is high and supply is low, this score is high.
-  // If supply > demand, this score is 0.
-  // We add a small buffer or scaling if needed, but simple subtraction is a good start.
-  const rawScore = demand - (supply * 0.8); // Discount supply slightly to be generous to opportunities
-  return Math.max(0, Math.min(100, Math.round(rawScore)));
+  const raw = demand - (supply * 0.8);
+  return Math.max(0, Math.min(100, Math.round(raw)));
 };
 
 /**
- * Calculates Breakout Probability based on signal velocity (growth rate).
+ * Breakout Probability based on weighted signal velocity.
+ * OwnSales velocity is the strongest predictor.
  */
 export const calculateBreakoutProbability = (signals: SignalData[]): number => {
   let weightedVelocity = 0;
   let totalWeight = 0;
 
-  signals.forEach(signal => {
+  for (const signal of signals) {
     const weight = PLATFORM_WEIGHTS[signal.platform] || 1;
     weightedVelocity += signal.velocity * weight;
     totalWeight += weight;
-  });
+  }
 
   const avgVelocity = totalWeight > 0 ? weightedVelocity / totalWeight : 0;
 
-  // Map velocity to probability.
-  // Velocity of 0 -> 20% probability
-  // Velocity of 10 -> 60% probability
-  // Velocity of 20 -> 100% probability
-  const baseProb = 20;
-  const velocityFactor = 4; 
-  
-  const prob = baseProb + (avgVelocity * velocityFactor);
+  // Map: velocity 0 -> 20%, velocity 10 -> 60%, velocity 20 -> 100%
+  const prob = 20 + (avgVelocity * 4);
   return Math.max(0, Math.min(100, Math.round(prob)));
+};
+
+/**
+ * Predict breakout week using linear projection of unmet demand history.
+ * Returns 0 if slope is flat or negative (not breaking out).
+ */
+export const predictBreakoutWeek = (
+  historyScores: { week: number; unmetDemandScore: number }[],
+  currentUnmetDemand: number,
+  threshold = 80
+): number => {
+  if (currentUnmetDemand >= threshold) return 0; // already broken out
+
+  // Need at least 3 data points
+  if (historyScores.length < 3) {
+    return currentUnmetDemand > 50 ? 4 : 0; // rough guess
+  }
+
+  // Use last 6 points max for slope calculation
+  const recent = historyScores.slice(-6);
+  const n = recent.length;
+  const sumX = recent.reduce((a, h) => a + h.week, 0);
+  const sumY = recent.reduce((a, h) => a + h.unmetDemandScore, 0);
+  const sumXY = recent.reduce((a, h) => a + h.week * h.unmetDemandScore, 0);
+  const sumX2 = recent.reduce((a, h) => a + h.week * h.week, 0);
+
+  const denom = (n * sumX2 - sumX * sumX);
+  if (denom === 0) return 0;
+
+  const slope = (n * sumXY - sumX * sumY) / denom;
+
+  if (slope <= 0) return 0; // flat or declining
+
+  const weeksToThreshold = Math.ceil((threshold - currentUnmetDemand) / slope);
+  return Math.min(52, Math.max(1, weeksToThreshold));
 };
