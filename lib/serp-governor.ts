@@ -8,6 +8,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
+const SERP_ENABLED = (process.env.ENABLE_SERPAPI ?? process.env.ENABLE_SERP ?? 'true').toLowerCase() !== 'false';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const SERPAPI_TIMEOUT_MS = Number(process.env.SERPAPI_TIMEOUT_MS || 5000);
@@ -115,6 +116,10 @@ export interface SerpResult {
 }
 
 export async function serpSearch(params: SerpSearchParams): Promise<SerpResult> {
+  if (!SERP_ENABLED) {
+    return { data: null, fromCache: false, callsRemaining: { today: DAILY_SOFT_CAP, month: MONTHLY_BUDGET } };
+  }
+
   if (!SERPAPI_KEY) {
     return { data: null, fromCache: false, callsRemaining: { today: DAILY_SOFT_CAP, month: MONTHLY_BUDGET } };
   }
