@@ -92,12 +92,14 @@ const WEIGHTS: Record<string, number> = {
   GoogleNews: 1.4, Pinterest: 1.2, GoogleSearch: 1.0, MetaAds: 0.8, Wildchat: 0.6,
   Yelp: 0.5, DoorDash: 0.5, GoogleMaps: 0.5, RedditPushshift: 0.3,
 };
-const SUPPLY = new Set(['Yelp', 'DoorDash', 'GoogleMaps']);
+const SUPPLY = new Set(['Yelp', 'GoogleMaps']);
 
 const demandScore = (signals: SignalData[]): number => {
   let tw = 0, tws = 0;
   for (const s of signals) {
     if (SUPPLY.has(s.platform)) continue;
+    // Skip platforms that returned nothing — don't let unconfigured sources drag the average down
+    if (s.currentIntensity === 0 && s.velocity === 0) continue;
     const w = WEIGHTS[s.platform] || 1;
     tws += s.currentIntensity * w; tw += w;
   }
@@ -105,12 +107,12 @@ const demandScore = (signals: SignalData[]): number => {
 };
 
 const supplyScore = (signals: SignalData[]): number => {
-  const ss = signals.filter(s => SUPPLY.has(s.platform));
-  if (!ss.length) return 10;
+  const ss = signals.filter(s => SUPPLY.has(s.platform) && s.currentIntensity > 0);
+  if (!ss.length) return 5;
   return Math.min(100, Math.round(ss.reduce((a, s) => a + s.currentIntensity, 0) / ss.length));
 };
 
-const unmetDemand = (d: number, s: number) => Math.max(0, Math.min(100, Math.round(d - s * 0.8)));
+const unmetDemand = (d: number, s: number) => Math.max(0, Math.min(100, Math.round(d - s * 0.6)));
 
 const breakoutProb = (signals: SignalData[]): number => {
   let wv = 0, tw = 0;
@@ -176,10 +178,22 @@ async function fetchYelp(term: string): Promise<SignalData> {
   try {
     const result = await serpSearch({ engine: 'yelp', find_desc: term, find_loc: REGION });
     if (!result.data) return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] };
-    const total = result.data.organic_results?.length || 0;
+    const results = result.data.organic_results || [];
+    // Only count results that specifically mention the term (not just generic restaurants)
+    const termLower = term.toLowerCase();
+    let specificCount = 0;
+    for (const r of results) {
+      const cats = (r.categories || []).map((c: any) => (c.title || c || '').toLowerCase()).join(' ');
+      const title = (r.title || '').toLowerCase();
+      const snippet = (r.snippet || '').toLowerCase();
+      if (cats.includes(termLower) || title.includes(termLower) || snippet.includes(termLower)) {
+        specificCount++;
+      }
+    }
+    // Scale: 1 specific match = 15, 5 = 75, 7+ = 100
     return {
       platform: Platform.Yelp,
-      currentIntensity: Math.min(100, Math.round((total / 10) * 100)),
+      currentIntensity: Math.min(100, specificCount * 15),
       velocity: 0, history: [],
     };
   } catch { return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] }; }
@@ -291,18 +305,19 @@ async function fetchGoogleMaps(term: string): Promise<SignalData> {
     const result = await serpSearch({ engine: 'google_maps', q: `${term} ${REGION}`, type: 'search' });
     if (!result.data) return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] };
     const places = result.data.local_results || [];
-    // Count establishments and average rating
-    const count = places.length;
-    let totalRating = 0;
-    let ratedCount = 0;
+    // Only count places that specifically reference the term
+    const termLower = term.toLowerCase();
+    let specificCount = 0;
     for (const p of places) {
-      if (p.rating) {
-        totalRating += p.rating;
-        ratedCount++;
+      const title = (p.title || '').toLowerCase();
+      const type = (p.type || '').toLowerCase();
+      const desc = (p.description || '').toLowerCase();
+      if (title.includes(termLower) || type.includes(termLower) || desc.includes(termLower)) {
+        specificCount++;
       }
     }
-    // High count = saturated supply, scale: 20 places = 100 intensity
-    const intensity = Math.min(100, count * 5);
+    // Scale: 3 specific places = 30, 7 = 70, 10+ = 100
+    const intensity = Math.min(100, specificCount * 10);
     return { platform: Platform.GoogleMaps, currentIntensity: intensity, velocity: 0, history: [] };
   } catch { return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] }; }
 }

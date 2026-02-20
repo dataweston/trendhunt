@@ -19,7 +19,6 @@ const PLATFORM_WEIGHTS: Record<Platform, number> = {
 
 const SUPPLY_PLATFORMS = new Set<Platform>([
   Platform.Yelp,
-  Platform.DoorDash,
   Platform.GoogleMaps,
 ]);
 
@@ -32,6 +31,7 @@ const DEMAND_PLATFORMS = new Set<Platform>([
   Platform.GoogleNews,
   Platform.Pinterest,
   Platform.GoogleSearch,
+  Platform.DoorDash,
   Platform.MetaAds,
   Platform.Wildchat,
 ]);
@@ -45,6 +45,8 @@ export const calculateDemandScore = (signals: SignalData[]): number => {
 
   for (const signal of signals) {
     if (!DEMAND_PLATFORMS.has(signal.platform)) continue;
+    // Skip platforms that returned nothing — don't let unconfigured sources drag the average down
+    if (signal.currentIntensity === 0 && signal.velocity === 0) continue;
     const weight = PLATFORM_WEIGHTS[signal.platform] || 1;
     totalWeightedScore += signal.currentIntensity * weight;
     totalWeight += weight;
@@ -59,8 +61,8 @@ export const calculateDemandScore = (signals: SignalData[]): number => {
  * Google Places count (stored as GoogleSearch from Places API) also counts as supply.
  */
 export const calculateSupplyScore = (signals: SignalData[]): number => {
-  const supplySignals = signals.filter(s => SUPPLY_PLATFORMS.has(s.platform));
-  if (supplySignals.length === 0) return 10; // baseline low supply
+  const supplySignals = signals.filter(s => SUPPLY_PLATFORMS.has(s.platform) && s.currentIntensity > 0);
+  if (supplySignals.length === 0) return 5; // baseline low supply
   const avg = supplySignals.reduce((acc, s) => acc + s.currentIntensity, 0) / supplySignals.length;
   return Math.min(100, Math.round(avg));
 };
@@ -69,7 +71,7 @@ export const calculateSupplyScore = (signals: SignalData[]): number => {
  * Unmet Demand = Demand - discounted Supply. Clamped [0, 100].
  */
 export const calculateUnmetDemandScore = (demand: number, supply: number): number => {
-  const raw = demand - (supply * 0.8);
+  const raw = demand - (supply * 0.6);
   return Math.max(0, Math.min(100, Math.round(raw)));
 };
 
