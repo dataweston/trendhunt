@@ -22,10 +22,43 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
+// --- Generic terms that are NOT trends — permanent food categories ---
+const GENERIC_BLOCKLIST = new Set([
+  // Broad Yelp categories that always appear
+  'noodles', 'burgers', 'pizza', 'sandwiches', 'salads', 'sushi', 'tacos',
+  'wings', 'seafood', 'steakhouses', 'delis', 'bakeries', 'cafes', 'diners',
+  'buffets', 'barbeque', 'barbecue', 'breweries', 'bars', 'pubs',
+  'pan asian', 'asian fusion', 'chinese', 'japanese', 'thai', 'indian',
+  'mexican', 'italian', 'greek', 'mediterranean', 'french', 'korean',
+  'vietnamese', 'middle eastern', 'american', 'southern', 'cajun',
+  // Generic food words
+  'food', 'restaurants', 'dining', 'takeout', 'delivery', 'catering',
+  'fast food', 'fine dining', 'casual dining', 'breakfast', 'brunch',
+  'lunch', 'dinner', 'desserts', 'appetizers', 'drinks', 'beverages',
+  'coffee', 'tea', 'smoothies', 'juice', 'beer', 'wine', 'cocktails',
+  'ice cream', 'frozen yogurt', 'donuts', 'pastries', 'bread',
+  // Too vague
+  'comfort food', 'street food', 'soul food', 'home cooking', 'healthy',
+  'organic', 'vegan', 'vegetarian', 'gluten free', 'gluten-free',
+  'food trucks', 'food delivery services', 'food stands',
+  'chicken', 'steak', 'pasta', 'soup', 'salad', 'rice', 'wraps',
+  'hot dogs', 'fries', 'chips', 'nachos', 'quesadillas',
+]);
+
+function isGenericTerm(term: string): boolean {
+  const normalized = term.toLowerCase().trim();
+  if (GENERIC_BLOCKLIST.has(normalized)) return true;
+  // Also block single-word cuisine types and very short terms
+  if (normalized.split(/\s+/).length === 1 && normalized.length < 8) return true;
+  return false;
+}
+
 async function queueTerm(term: string, source: string, score: number) {
   if (!supabase || !term || term.length < 3 || term.length > 80) return;
   const normalized = term.trim().replace(/\s+/g, ' ');
   if (normalized.length < 3) return;
+  // Block generic food categories — these are not trends
+  if (isGenericTerm(normalized)) return;
   // Skip if already tracked
   const { data: existing } = await supabase.from('trends').select('id').ilike('term', normalized).maybeSingle();
   if (existing) return;
@@ -39,7 +72,14 @@ async function queueTerm(term: string, source: string, score: number) {
 async function discoverYelp(location: string): Promise<{ terms: string[]; businessNames: string[] }> {
   const terms: string[] = [];
   const businessNames: string[] = [];
-  const genericCategories = new Set(['Restaurants', 'Food', 'Food Delivery Services', 'Food Trucks', 'American (New)', 'American (Traditional)', 'Bars']);
+  const genericCategories = new Set(['Restaurants', 'Food', 'Food Delivery Services', 'Food Trucks', 'American (New)', 'American (Traditional)', 'Bars',
+    'Noodles', 'Burgers', 'Pizza', 'Sandwiches', 'Salads', 'Seafood', 'Steakhouses', 'Delis', 'Bakeries',
+    'Cafes', 'Diners', 'Buffets', 'Barbeque', 'Breweries', 'Pubs', 'Pan Asian', 'Asian Fusion',
+    'Chinese', 'Japanese', 'Thai', 'Indian', 'Mexican', 'Italian', 'Greek', 'Mediterranean',
+    'French', 'Korean', 'Vietnamese', 'Middle Eastern', 'Southern', 'Breakfast & Brunch',
+    'Coffee & Tea', 'Ice Cream & Frozen Yogurt', 'Chicken Wings', 'Hot Dogs', 'Soup',
+    'Fast Food', 'Comfort Food', 'Soul Food', 'Vegetarian', 'Vegan',
+  ]);
 
   // SerpAPI yelp engine searches — uses your SERPAPI_KEY, no Yelp API key needed
   const searches = [
@@ -156,14 +196,19 @@ async function extractFoodTerms(rawTitles: string[], businessNames: string[]): P
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `You are a food trend analyst for the Minneapolis–St Paul metro area. From the sources below (Reddit post titles and restaurant business names), extract specific food items, dish names, cuisine types, or food concepts that represent current or emerging food trends.
+        contents: `You are a food trend analyst for the Minneapolis–St Paul metro area. Your job is to identify EMERGING food trends — specific dishes, preparations, or food concepts that are NEW, GROWING, or BREAKING OUT.
 
-Do NOT return generic terms like "Food", "Restaurants", "American". Focus on specific dishes, food types, or cuisine concepts (e.g., "Nashville Hot Chicken", "Mochi Donuts", "Korean BBQ", "Ube Lattes", "Filipino Street Food").
+Critical rules:
+- REJECT generic categories that have always existed ("burgers", "pizza", "sushi", "noodles", "thai food", etc.)
+- ONLY return specific, distinctive food items or preparations (e.g., "Nashville Hot Chicken", "Mochi Donuts", "Birria Ramen", "Ube Crinkle Cookies", "Filipino Lumpia")
+- A good trend term is something a food blogger would write about as NEW or NOTEWORTHY
+- Multi-word terms are almost always better than single words
+- Return FEWER high-quality terms rather than many generic ones
 
 Sources:
 ${combined.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 
-Return a JSON array of objects with "term" (the clean food concept name) and "confidence" (0-100, how likely this is a real food trend).`,
+Return a JSON array of objects with "term" (the clean food concept name) and "confidence" (0-100, how likely this is a real emerging trend, NOT just a common food).`,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
@@ -181,7 +226,7 @@ Return a JSON array of objects with "term" (the clean food concept name) and "co
       if (response.text) {
         const parsed = JSON.parse(response.text) as { term: string; confidence: number }[];
         const geminiTerms = parsed
-          .filter(p => p.term && p.term.length >= 3 && p.term.length <= 60 && p.confidence >= 30)
+          .filter(p => p.term && p.term.length >= 3 && p.term.length <= 60 && p.confidence >= 50 && !isGenericTerm(p.term))
           .map(p => p.term);
         if (geminiTerms.length > 0) return geminiTerms;
       }
@@ -264,21 +309,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // NLP extract food terms from Reddit titles + Yelp business names
     const extractedTerms = await extractFoodTerms(redditTitles, yelpResult.businessNames);
 
-    // Queue everything
-    let queued = 0;
-    const sourceLabel = zip ? `Zip ${zip}` : 'Cron';
+    // Queue with cross-source scoring: terms found in multiple sources score higher
+    // Track how many sources mentioned each term
+    const termSources = new Map<string, { sources: Set<string>; bestScore: number }>();
+    
+    const trackTerm = (term: string, source: string, score: number) => {
+      if (isGenericTerm(term)) return;
+      const key = term.toLowerCase().trim();
+      const existing = termSources.get(key) || { sources: new Set(), bestScore: 0 };
+      existing.sources.add(source);
+      existing.bestScore = Math.max(existing.bestScore, score);
+      termSources.set(key, existing);
+    };
 
+    // Yelp categories are only interesting if they're specific/niche — most will be blocked
     for (const cat of yelpResult.terms) {
-      await queueTerm(cat, `Yelp Category (${sourceLabel})`, 50);
-      queued++;
+      trackTerm(cat, 'yelp', 30);
     }
     for (const rq of risingQueries) {
-      await queueTerm(rq.term, `SerpAPI Rising Query`, rq.score);
-      queued++;
+      trackTerm(rq.term, 'rising', rq.score);
     }
     for (const term of extractedTerms) {
-      await queueTerm(term, `NLP Extracted (${sourceLabel})`, 40);
-      queued++;
+      trackTerm(term, 'nlp', 40);
+    }
+
+    // Score: base score + bonus for multi-source corroboration
+    let queued = 0;
+    for (const [term, info] of termSources) {
+      const sourceCount = info.sources.size;
+      // Multi-source bonus: 2 sources = +20, 3+ = +40
+      const multiSourceBonus = sourceCount >= 3 ? 40 : sourceCount >= 2 ? 20 : 0;
+      const finalScore = Math.min(100, info.bestScore + multiSourceBonus);
+      const sourceLabel = [...info.sources].join('+');
+      // Prefer multi-source terms; single-source terms need high base score (>= 60)
+      if (sourceCount >= 2 || info.bestScore >= 60) {
+        // Use original casing from extracted terms if available
+        const displayTerm = extractedTerms.find(t => t.toLowerCase() === term) 
+          || risingQueries.find(rq => rq.term.toLowerCase() === term)?.term 
+          || yelpResult.terms.find(t => t.toLowerCase() === term) 
+          || term;
+        await queueTerm(displayTerm, `${sourceLabel} (${sourceLabel.includes('zip') ? `Zip ${zip}` : 'Cron'})`, finalScore);
+        queued++;
+      }
     }
 
     res.status(200).json({

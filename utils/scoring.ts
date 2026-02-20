@@ -89,9 +89,39 @@ export const calculateBreakoutProbability = (signals: SignalData[]): number => {
 
   const avgVelocity = totalWeight > 0 ? weightedVelocity / totalWeight : 0;
 
-  // Map: velocity 0 -> 20%, velocity 10 -> 60%, velocity 20 -> 100%
-  const prob = 20 + (avgVelocity * 4);
+  // Count how many platforms show positive velocity (convergence signal)
+  const positiveVelocityCount = signals.filter(s => s.velocity > 0 && DEMAND_PLATFORMS.has(s.platform)).length;
+  const convergenceBonus = positiveVelocityCount >= 3 ? 15 : positiveVelocityCount >= 2 ? 8 : 0;
+
+  // Map: velocity 0 -> 20%, velocity 10 -> 60%, velocity 20 -> 100%; plus convergence bonus
+  const prob = 20 + (avgVelocity * 4) + convergenceBonus;
   return Math.max(0, Math.min(100, Math.round(prob)));
+};
+
+/**
+ * Signal Convergence Score: how many distinct platforms show meaningful activity.
+ * A trend signaled by 1 platform is noise; 4+ platforms is real.
+ */
+export const calculateConvergenceScore = (signals: SignalData[]): number => {
+  const activePlatforms = signals.filter(
+    s => DEMAND_PLATFORMS.has(s.platform) && s.currentIntensity > 10
+  ).length;
+  // 1 platform = 10, 2 = 30, 3 = 55, 4 = 75, 5+ = 90+
+  return Math.min(100, Math.round(activePlatforms * activePlatforms * 4));
+};
+
+/**
+ * Momentum Score: are signals accelerating across platforms?
+ * Positive velocity on multiple demand platforms = strong momentum.
+ */
+export const calculateMomentumScore = (signals: SignalData[]): number => {
+  const demandSignals = signals.filter(s => DEMAND_PLATFORMS.has(s.platform) && s.currentIntensity > 0);
+  if (demandSignals.length === 0) return 0;
+  const accelerating = demandSignals.filter(s => s.velocity > 2).length;
+  const decelerating = demandSignals.filter(s => s.velocity < -2).length;
+  // Net momentum: ratio of accelerating vs total active signals
+  const ratio = (accelerating - decelerating) / demandSignals.length;
+  return Math.max(0, Math.min(100, Math.round(50 + ratio * 50)));
 };
 
 /**
