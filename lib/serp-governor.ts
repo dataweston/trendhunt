@@ -25,6 +25,7 @@ const TTL: Record<string, number> = {
   google_light: 72,                 // discovery scans — weekly-ish
   google: 24,                       // full enrichment
   google_maps: 168,                 // supplier/business data — weekly
+  yelp: 24,                         // yelp restaurant data — daily refresh
 };
 
 // --- Cache key ---

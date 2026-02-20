@@ -9,7 +9,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 const META_ACCESS_TOKEN = process.env.FACEBOOK_ACCESS_TOKEN;
 const META_AD_ACCOUNT_ID = process.env.FACEBOOK_AD_ACCOUNT_ID;
-const GEMINI_API_KEY = process.env.API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const META_API = 'https://graph.facebook.com/v21.0';

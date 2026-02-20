@@ -17,8 +17,7 @@ import { serpSearch } from '../lib/serp-governor.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const YELP_API_KEY = process.env.YELP_API_KEY;
-const GEMINI_API_KEY = process.env.API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
@@ -36,37 +35,49 @@ async function queueTerm(term: string, source: string, score: number) {
   await supabase.from('discovery_queue').insert({ term: normalized, source, initial_score: Math.round(score), status: 'pending' });
 }
 
-// --- Yelp: popular + hot_and_new businesses in location ---
+// --- Yelp via SerpAPI: popular + trending businesses in location ---
 async function discoverYelp(location: string): Promise<{ terms: string[]; businessNames: string[] }> {
-  if (!YELP_API_KEY) return { terms: [], businessNames: [] };
   const terms: string[] = [];
   const businessNames: string[] = [];
-  
-  // Search both hot_and_new and general popular food
+  const genericCategories = new Set(['Restaurants', 'Food', 'Food Delivery Services', 'Food Trucks', 'American (New)', 'American (Traditional)', 'Bars']);
+
+  // SerpAPI yelp engine searches — uses your SERPAPI_KEY, no Yelp API key needed
   const searches = [
-    { location, categories: 'food,restaurants', attributes: 'hot_and_new', limit: 20, sort_by: 'rating' },
-    { location, categories: 'food,restaurants', limit: 50, sort_by: 'best_match' },
-    { location, term: 'trending food', limit: 20, sort_by: 'best_match' },
+    { engine: 'yelp', find_desc: 'restaurants', find_loc: location, sortby: 'recommended' },
+    { engine: 'yelp', find_desc: 'trending food', find_loc: location, sortby: 'recommended' },
+    { engine: 'yelp', find_desc: 'new restaurants', find_loc: location, sortby: 'recommended' },
   ];
 
   for (const params of searches) {
     try {
-      const { data } = await axios.get('https://api.yelp.com/v3/businesses/search', {
-        headers: { Authorization: `Bearer ${YELP_API_KEY}` },
-        params,
-      });
-      for (const b of (data.businesses || [])) {
-        // Extract category titles as potential food terms
-        for (const cat of (b.categories || [])) {
-          if (cat.title && !['Restaurants', 'Food', 'Food Delivery Services', 'Food Trucks'].includes(cat.title)) {
-            terms.push(cat.title);
+      const result = await serpSearch(params as any);
+      if (!result.data) continue;
+      const results = result.data.organic_results || [];
+      for (const b of results) {
+        // Extract category names
+        if (b.categories) {
+          for (const cat of b.categories) {
+            const title = cat.title || cat;
+            if (typeof title === 'string' && title.length > 2 && !genericCategories.has(title)) {
+              terms.push(title);
+            }
           }
         }
-        // Also collect business names — Gemini can extract food concepts from them
-        if (b.name) businessNames.push(b.name);
+        // Collect business names for NLP extraction
+        if (b.title) businessNames.push(b.title);
+        // Also extract from snippet/highlights
+        if (b.snippet) {
+          const foodMentions = b.snippet.match(/(?:known for|famous for|specializing in|try the|best)\s+([^.!,]{3,40})/gi);
+          if (foodMentions) {
+            for (const m of foodMentions) {
+              const clean = m.replace(/^(known for|famous for|specializing in|try the|best)\s+/i, '').trim();
+              if (clean.length >= 3) businessNames.push(clean);
+            }
+          }
+        }
       }
     } catch (e) {
-      console.error('Yelp discovery error:', e);
+      console.error('SerpAPI Yelp discovery error:', e);
     }
   }
 
@@ -95,18 +106,34 @@ async function discoverRisingQueries(seedTerms: string[]) {
 
 // --- Reddit Local Subs ---
 async function discoverReddit(): Promise<string[]> {
-  const subs = ['Minneapolis', 'TwinCities', 'minnesota'];
+  const subs = ['Minneapolis', 'TwinCities', 'minnesota', 'MSPFood', 'MinneapolisFood'];
   const keywords = ['food', 'eat', 'restaurant', 'drink', 'coffee', 'pizza', 'taco', 'burger', 'sushi', 'bakery',
-    'tried', 'best', 'opening', 'new', 'menu', 'brunch', 'dinner', 'lunch', 'dessert', 'ramen', 'thai', 'korean'];
+    'tried', 'best', 'opening', 'new', 'menu', 'brunch', 'dinner', 'lunch', 'dessert', 'ramen', 'thai', 'korean',
+    'bbq', 'brewery', 'bar', 'café', 'cafe', 'diner', 'pho', 'boba', 'chicken', 'vegan', 'wings', 'steak',
+    'tasting', 'popup', 'pop-up', 'food truck', 'ice cream', 'donut', 'bagel', 'sandwich', 'bowl', 'curry',
+    'happy hour', 'smash burger', 'birria', 'elote', 'ube', 'mochi', 'matcha'];
   const titles: string[] = [];
+
+  // Fetch hot + search for food in local subs
+  const fetches: { url: string; sub: string }[] = [];
   for (const sub of subs) {
+    fetches.push({ url: `https://www.reddit.com/r/${sub}/hot.json?limit=50`, sub });
+    fetches.push({ url: `https://www.reddit.com/r/${sub}/search.json?q=food+OR+restaurant+OR+new+opening&restrict_sr=on&sort=new&limit=25`, sub });
+  }
+  // Also hit broader food subs with Minneapolis filter
+  fetches.push({ url: `https://www.reddit.com/r/foodie/search.json?q=minneapolis+OR+twin+cities&sort=new&limit=15`, sub: 'foodie' });
+
+  for (const { url, sub } of fetches) {
     try {
-      const { data } = await axios.get(`https://www.reddit.com/r/${sub}/hot.json?limit=25`, {
+      const { data } = await axios.get(url, {
         headers: { 'User-Agent': 'TrendHunter/1.0' },
+        timeout: 5000,
       });
-      for (const post of (data.data.children || [])) {
-        const title = post.data.title;
-        if (keywords.some(k => title.toLowerCase().includes(k))) {
+      for (const post of (data?.data?.children || [])) {
+        const title = post.data?.title || '';
+        const selftext = (post.data?.selftext || '').slice(0, 200);
+        const combined = `${title} ${selftext}`.toLowerCase();
+        if (keywords.some(k => combined.includes(k))) {
           titles.push(title);
         }
       }
@@ -114,27 +141,22 @@ async function discoverReddit(): Promise<string[]> {
       console.error('Reddit discovery error for r/' + sub, e);
     }
   }
-  return titles;
+  return [...new Set(titles)];
 }
 
 // --- Gemini NLP: extract food terms from raw titles + business names ---
 async function extractFoodTerms(rawTitles: string[], businessNames: string[]): Promise<string[]> {
-  if (!ai) {
-    // Fallback: return business names as-is (limited)
-    return businessNames.slice(0, 5);
-  }
-  
   const combined = [
-    ...rawTitles.map((t, i) => `Reddit: ${t}`),
-    ...businessNames.slice(0, 20).map((n, i) => `Restaurant: ${n}`),
+    ...rawTitles.map((t) => `Reddit: ${t}`),
+    ...businessNames.slice(0, 20).map((n) => `Restaurant: ${n}`),
   ];
-  
-  if (combined.length === 0) return [];
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: `You are a food trend analyst for the Minneapolis–St Paul metro area. From the sources below (Reddit post titles and restaurant business names), extract specific food items, dish names, cuisine types, or food concepts that represent current or emerging food trends.
+  // If Gemini is available, use it for smart extraction
+  if (ai && combined.length > 0) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `You are a food trend analyst for the Minneapolis–St Paul metro area. From the sources below (Reddit post titles and restaurant business names), extract specific food items, dish names, cuisine types, or food concepts that represent current or emerging food trends.
 
 Do NOT return generic terms like "Food", "Restaurants", "American". Focus on specific dishes, food types, or cuisine concepts (e.g., "Nashville Hot Chicken", "Mochi Donuts", "Korean BBQ", "Ube Lattes", "Filipino Street Food").
 
@@ -142,29 +164,68 @@ Sources:
 ${combined.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 
 Return a JSON array of objects with "term" (the clean food concept name) and "confidence" (0-100, how likely this is a real food trend).`,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              term: { type: Type.STRING },
-              confidence: { type: Type.NUMBER },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                term: { type: Type.STRING },
+                confidence: { type: Type.NUMBER },
+              },
             },
           },
         },
-      },
-    });
-    if (!response.text) return [];
-    const parsed = JSON.parse(response.text) as { term: string; confidence: number }[];
-    return parsed
-      .filter(p => p.term && p.term.length >= 3 && p.term.length <= 60 && p.confidence >= 30)
-      .map(p => p.term);
-  } catch (e) {
-    console.error('Gemini extraction failed:', e);
-    return businessNames.slice(0, 5);
+      });
+      if (response.text) {
+        const parsed = JSON.parse(response.text) as { term: string; confidence: number }[];
+        const geminiTerms = parsed
+          .filter(p => p.term && p.term.length >= 3 && p.term.length <= 60 && p.confidence >= 30)
+          .map(p => p.term);
+        if (geminiTerms.length > 0) return geminiTerms;
+      }
+    } catch (e) {
+      console.error('Gemini extraction failed, using keyword fallback:', e);
+    }
   }
+
+  // Keyword-based fallback — extract food concepts from Reddit titles directly
+  return extractFoodTermsKeyword(rawTitles, businessNames);
+}
+
+// --- Keyword fallback: simple pattern-based extraction ---
+function extractFoodTermsKeyword(titles: string[], businessNames: string[]): string[] {
+  const foodPatterns = [
+    // Cuisine types
+    /\b(korean|thai|vietnamese|japanese|mexican|indian|ethiopian|italian|chinese|mediterranean|greek|filipino|somali|hmong|cajun|creole|southern|hawaiian|peruvian)\s*(bbq|barbecue|food|cuisine|street food|fusion)?\b/gi,
+    // Specific food items/dishes
+    /\b(ramen|pho|boba|bubble tea|sushi|birria|elote|ube|mochi|matcha|acai|poke|banh mi|dim sum|dumplings|gyoza|pad thai|tikka masala|shawarma|falafel|kimchi|bulgogi|bibimbap|tonkotsu|takoyaki|okonomiyaki|empanada|arepa|pupusa)\b/gi,
+    // Food categories
+    /\b(smash burger|nashville hot chicken|detroit style pizza|neapolitan pizza|sourdough|croissant|charcuterie|wagyu|tartare|ceviche|al pastor|carnitas|chicharron|pozole|tamale|hot pot|korean fried chicken|chicken sandwich|breakfast burrito|breakfast sandwich)\b/gi,
+    // Trend-y food terms
+    /\b(food truck|pop-?up|tasting menu|omakase|prix fixe|farm.to.table|craft cocktail|natural wine|kombucha|cold brew|oat milk|plant.based|vegan|gluten.free)\b/gi,
+    // Desserts
+    /\b(donut|doughnut|ice cream|gelato|macaron|churro|crème brûlée|tiramisu|baklava|mochi donut|ube cake|matcha latte|affogato|croffle|croffin)\b/gi,
+  ];
+
+  const extracted = new Set<string>();
+  const allText = [...titles, ...businessNames];
+
+  for (const text of allText) {
+    for (const pattern of foodPatterns) {
+      const matches = text.matchAll(new RegExp(pattern.source, 'gi'));
+      for (const match of matches) {
+        const term = match[0].trim();
+        if (term.length >= 3) {
+          // Title-case the term
+          extracted.add(term.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' '));
+        }
+      }
+    }
+  }
+
+  return [...extracted].slice(0, 20);
 }
 
 // --- Handler ---
@@ -225,9 +286,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       location,
       processed: queued,
       sources: {
-        yelp: yelpResult.terms.length,
+        yelp_categories: yelpResult.terms.length,
+        yelp_businesses: yelpResult.businessNames.length,
         rising: risingQueries.length,
-        reddit: extractedTerms.length,
+        reddit_titles: redditTitles.length,
+        nlp_extracted: extractedTerms.length,
+      },
+      debug: {
+        gemini_available: !!ai,
+        yelp_via_serpapi: true,
+        extracted_terms: extractedTerms.slice(0, 10),
+        sample_reddit: redditTitles.slice(0, 3),
       },
     });
   } catch (error) {

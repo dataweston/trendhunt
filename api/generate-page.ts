@@ -10,7 +10,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const GEMINI_API_KEY = process.env.API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 const SANITY_PROJECT_ID = process.env.SANITY_PROJECT_ID;
 const SANITY_TOKEN = process.env.SANITY_TOKEN;
 const SANITY_DATASET = process.env.SANITY_DATASET || 'production';

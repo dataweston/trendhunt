@@ -34,7 +34,18 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
       const res = await fetch(`/api/discover?manual=true&zip=${zip}`);
       const data = await res.json();
       if (res.ok) {
-        setScanResult(`Found ${data.processed || 0} terms (Yelp: ${data.sources?.yelp || 0}, Rising: ${data.sources?.rising || 0}, Reddit: ${data.sources?.reddit || 0})`);
+        const s = data.sources || {};
+        const parts = [
+          `${data.processed || 0} terms queued`,
+          s.reddit_titles ? `${s.reddit_titles} Reddit posts` : null,
+          s.nlp_extracted ? `${s.nlp_extracted} NLP extracted` : null,
+          s.yelp_categories ? `${s.yelp_categories} Yelp cats` : null,
+          s.rising ? `${s.rising} rising queries` : null,
+        ].filter(Boolean);
+        setScanResult(parts.join(' · '));
+        if (data.debug?.extracted_terms?.length) {
+          setScanResult(prev => `${prev}\nTerms: ${data.debug.extracted_terms.join(', ')}`);
+        }
         await fetchQueue(); // refresh the queue
       } else {
         setScanResult(`Error: ${data.error || 'Scan failed'}`);
@@ -97,7 +108,7 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
           </button>
         </form>
         {scanResult && (
-          <div className={`mt-3 text-xs p-2 rounded ${scanResult.startsWith('Error') || scanResult.startsWith('Network') ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}`}>
+          <div className={`mt-3 text-xs p-2 rounded whitespace-pre-line ${scanResult.startsWith('Error') || scanResult.startsWith('Network') ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}`}>
             {scanResult}
           </div>
         )}

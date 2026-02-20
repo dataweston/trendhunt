@@ -41,7 +41,6 @@ interface TrendEntity {
 
 // --- Config ---
 const REGION = 'Minneapolis';
-const YELP_API_KEY = process.env.YELP_API_KEY;
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -146,15 +145,14 @@ async function fetchSerpDelivery(term: string): Promise<SignalData> {
 }
 
 async function fetchYelp(term: string): Promise<SignalData> {
-  if (!YELP_API_KEY) return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] };
+  // Use SerpAPI's yelp engine instead of direct Yelp API (no Yelp key needed)
   try {
-    const { data } = await axios.get('https://api.yelp.com/v3/businesses/search', {
-      headers: { Authorization: `Bearer ${YELP_API_KEY}` },
-      params: { term, location: REGION, limit: 50 },
-    });
+    const result = await serpSearch({ engine: 'yelp', find_desc: term, find_loc: REGION });
+    if (!result.data) return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] };
+    const total = result.data.organic_results?.length || 0;
     return {
       platform: Platform.Yelp,
-      currentIntensity: Math.min(100, Math.round(((data.total || 0) / 50) * 100)),
+      currentIntensity: Math.min(100, Math.round((total / 10) * 100)),
       velocity: 0, history: [],
     };
   } catch { return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] }; }
