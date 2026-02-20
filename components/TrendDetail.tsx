@@ -67,6 +67,39 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
             </div>
           </div>
 
+          {/* All Signal Breakdown */}
+          <div className="bg-slate-800/30 rounded-lg border border-slate-700 p-4">
+            <h3 className="text-sm font-medium text-slate-300 mb-3">All Signal Sources</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {trend.signals.filter(s => s.currentIntensity > 0 || s.velocity !== 0).map(s => {
+                const labels: Record<string, string> = {
+                  GoogleSearch: 'Google Trends', Yelp: 'Yelp Supply', DoorDash: 'Delivery Search',
+                  Reddit: 'Reddit', TikTok: 'TikTok', Pinterest: 'Pinterest',
+                  OwnTraffic: 'Your GA4 Traffic', OwnSales: 'Your Square Sales',
+                  Wildchat: 'LLM Mentions', MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
+                };
+                const colors: Record<string, string> = {
+                  GoogleSearch: 'text-blue-400', Yelp: 'text-red-400', Reddit: 'text-orange-400',
+                  TikTok: 'text-cyan-400', Pinterest: 'text-pink-400', OwnTraffic: 'text-violet-400',
+                  OwnSales: 'text-emerald-400', DoorDash: 'text-red-500', Wildchat: 'text-yellow-400',
+                  MetaAds: 'text-blue-500',
+                };
+                return (
+                  <div key={s.platform} className="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+                    <div className={`text-xs font-bold ${colors[s.platform] || 'text-slate-400'} mb-1`}>{labels[s.platform] || s.platform}</div>
+                    <div className="text-lg font-bold text-white">{s.currentIntensity}</div>
+                    <div className={`text-xs ${s.velocity > 0 ? 'text-emerald-400' : s.velocity < 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                      {s.velocity > 0 ? '+' : ''}{s.velocity} velocity
+                    </div>
+                  </div>
+                );
+              })}
+              {trend.signals.filter(s => s.currentIntensity > 0 || s.velocity !== 0).length === 0 && (
+                <p className="col-span-3 text-xs text-slate-500">No signals detected for this term.</p>
+              )}
+            </div>
+          </div>
+
           {/* AI Insight */}
           <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-lg p-6 relative">
              <div className="flex items-center gap-2 mb-4 text-indigo-300">

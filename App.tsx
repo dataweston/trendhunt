@@ -13,6 +13,7 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedTrend, setSelectedTrend] = useState<TrendEntity | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [activeSearch, setActiveSearch] = useState(''); // committed search
   const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue'>('dashboard');
 
   const loadData = useCallback(async (query = '') => {
@@ -29,10 +30,23 @@ const App = () => {
     }
   }, []);
 
+  // Load tracked trends on mount (no search query)
   useEffect(() => {
-    const timer = setTimeout(() => loadData(searchTerm), 300);
-    return () => clearTimeout(timer);
-  }, [loadData, searchTerm]);
+    loadData();
+  }, [loadData]);
+
+  // Only search when user explicitly submits
+  const handleSearch = useCallback(() => {
+    const q = searchTerm.trim();
+    setActiveSearch(q);
+    loadData(q);
+  }, [searchTerm, loadData]);
+
+  const clearSearch = useCallback(() => {
+    setSearchTerm('');
+    setActiveSearch('');
+    loadData();
+  }, [loadData]);
 
   const activeAlerts = trends.filter(t => t.breakoutProbability > 75).length;
 
@@ -98,16 +112,23 @@ const App = () => {
         {/* Top Bar */}
         <header className="h-16 bg-[#0f172a]/80 backdrop-blur border-b border-slate-800 flex items-center justify-between px-6 z-20 sticky top-0">
            <div className="flex items-center gap-4 flex-1 max-w-xl">
-              <div className="relative w-full">
-                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
-                 <input 
-                    type="text" 
-                    placeholder="Search terms, cuisines, or zip codes..." 
-                    className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-full pl-10 pr-4 py-2 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                 />
-              </div>
+              <form className="relative w-full flex gap-2" onSubmit={(e) => { e.preventDefault(); handleSearch(); }}>
+                 <div className="relative flex-1">
+                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
+                   <input 
+                      type="text" 
+                      placeholder="Search a food term, then press Enter..." 
+                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-full pl-10 pr-4 py-2 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                   />
+                 </div>
+                 {activeSearch && (
+                   <button type="button" onClick={clearSearch} className="text-xs text-slate-400 hover:text-white px-3 py-1 rounded-full border border-slate-700 hover:border-slate-500 transition-colors">
+                     Clear
+                   </button>
+                 )}
+              </form>
            </div>
            <div className="flex items-center gap-4 ml-4">
               <div className="text-right hidden sm:block">
@@ -128,8 +149,8 @@ const App = () => {
            {activeNav === 'queue' && (
              <div className="max-w-2xl">
                <h2 className="text-xl font-bold text-white mb-4">Discovery Queue</h2>
-               <p className="text-sm text-slate-400 mb-6">Terms discovered automatically from Yelp, Google Trends, and Reddit. Approve to start tracking.</p>
-               <DiscoveryQueue onApproved={loadData} />
+               <p className="text-sm text-slate-400 mb-6">Scan a zip code to discover trending food in that area, or review terms found automatically.</p>
+               <DiscoveryQueue onApproved={() => loadData()} />
              </div>
            )}
 
@@ -140,13 +161,25 @@ const App = () => {
              </div>
            )}
 
+           {activeNav === 'dashboard' && !loading && trends.length === 0 && !activeSearch && (
+             <div className="bg-slate-800/30 border border-slate-700 border-dashed rounded-xl p-8 text-center">
+               <Inbox size={32} className="mx-auto mb-3 text-slate-500" />
+               <h3 className="text-lg font-medium text-white mb-2">No terms tracked yet</h3>
+               <p className="text-sm text-slate-400 mb-4 max-w-md mx-auto">
+                 Go to the <button onClick={() => setActiveNav('queue')} className="text-emerald-400 underline hover:text-emerald-300">Discovery Queue</button> and scan a zip code (e.g. 55113) to discover food trends in your area. Approve terms to start tracking them here.
+               </p>
+               <p className="text-xs text-slate-500">Or search for a specific food term above to preview its signals.</p>
+             </div>
+           )}
+
            {activeNav === 'dashboard' && (<>
            {/* KPI Cards */}
+           {(trends.length > 0 || activeSearch) && (
            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Tracked Terms</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase">{activeSearch ? 'Search Results' : 'Tracked Terms'}</div>
                   <div className="text-2xl font-bold text-white mt-1">{trends.length}</div>
-                  <div className="text-xs text-emerald-400 mt-1">Live</div>
+                  <div className="text-xs text-emerald-400 mt-1">{activeSearch ? `"${activeSearch}"` : 'Live'}</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">High Probability Breakouts</div>
@@ -159,11 +192,22 @@ const App = () => {
                   <div className="text-xs text-slate-500 mt-1">Regional Average</div>
               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Top Gap</div>
-                  <div className="text-2xl font-bold text-red-400 mt-1">{trends.length > 0 ? [...trends].sort((a, b) => b.unmetDemandScore - a.unmetDemandScore)[0]?.neighborhood : '—'}</div>
-                  <div className="text-xs text-slate-500 mt-1">{trends.length > 0 ? [...trends].sort((a, b) => b.unmetDemandScore - a.unmetDemandScore)[0]?.term : ''}</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase">Your Website Traffic</div>
+                  {(() => {
+                    const trafficSignals = trends.flatMap(t => t.signals.filter(s => s.platform === 'OwnTraffic' && s.currentIntensity > 0));
+                    if (trafficSignals.length === 0) return (
+                      <><div className="text-2xl font-bold text-slate-500 mt-1">—</div>
+                      <div className="text-xs text-slate-500 mt-1">GA4 connected but no matches</div></>
+                    );
+                    const avg = Math.round(trafficSignals.reduce((a, s) => a + s.currentIntensity, 0) / trafficSignals.length);
+                    return (
+                      <><div className="text-2xl font-bold text-violet-400 mt-1">{avg}/100</div>
+                      <div className="text-xs text-slate-500 mt-1">{trafficSignals.length} term{trafficSignals.length > 1 ? 's' : ''} with GA4 traffic</div></>
+                    );
+                  })()}
               </div>
            </div>
+           )}
 
            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Main Chart Area */}
@@ -218,6 +262,29 @@ const App = () => {
                         )}
                     </div>
                  </div>
+
+                 {/* GA4 Website Traffic Signals */}
+                 {(() => {
+                    const trafficTerms = trends.filter(t => t.signals.some(s => s.platform === 'OwnTraffic' && s.currentIntensity > 0));
+                    if (trafficTerms.length === 0) return null;
+                    return (
+                      <div className="bg-violet-950/30 rounded-lg border border-violet-500/20 p-4">
+                        <h3 className="text-sm font-medium text-violet-200 mb-2">Your GA4 Traffic</h3>
+                        <div className="space-y-2">
+                          {trafficTerms.slice(0, 5).map(t => {
+                            const sig = t.signals.find(s => s.platform === 'OwnTraffic')!;
+                            return (
+                              <div key={t.id} className="flex justify-between text-xs">
+                                <span className="text-violet-100/70">{t.term}</span>
+                                <span className="text-violet-400 font-medium">{sig.currentIntensity} intensity{sig.velocity !== 0 ? `, ${sig.velocity > 0 ? '+' : ''}${sig.velocity} vel` : ''}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-violet-300/40 mt-2">Based on GA4 page views matching these terms</p>
+                      </div>
+                    );
+                 })()}
 
                  {(() => {
                     const top = [...trends].sort((a, b) => b.breakoutProbability - a.breakoutProbability)[0];
