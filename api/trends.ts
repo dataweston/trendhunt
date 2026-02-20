@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
-import { serpSearch } from './serp-governor';
+import { serpSearch } from '../lib/serp-governor';
 
 // --- Types (standalone for serverless) ---
 enum Platform {
