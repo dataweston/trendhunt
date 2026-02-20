@@ -10,6 +10,9 @@ export enum Platform {
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
   MetaAds = 'MetaAds',
+  YouTube = 'YouTube',
+  GoogleNews = 'GoogleNews',
+  GoogleMaps = 'GoogleMaps',
 }
 
 export interface TimeSeriesPoint {

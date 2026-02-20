@@ -28,14 +28,16 @@ const TTL: Record<string, number> = {
   google_trends_timeseries: 24,     // trends change daily, not hourly
   google_trends_related: 48,        // rising queries shift slowly
   google_light: 72,                 // discovery scans — weekly-ish
-  google: 24,                       // full enrichment
+  google: 24,                       // full enrichment (also used for TikTok site: searches)
   google_maps: 168,                 // supplier/business data — weekly
+  google_news: 12,                  // news changes fast, cache half-day
+  youtube: 48,                      // video results shift slowly
   yelp: 24,                         // yelp restaurant data — daily refresh
 };
 
 // --- Cache key ---
-function cacheKey(engine: string, params: Record<string, string>): string {
-  const sorted = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
+function cacheKey(engine: string, params: Record<string, string | undefined>): string {
+  const sorted = Object.keys(params).filter(k => params[k] !== undefined).sort().map(k => `${k}=${params[k]}`).join('&');
   return crypto.createHash('sha256').update(`${engine}:${sorted}`).digest('hex');
 }
 
@@ -105,8 +107,8 @@ async function getUsage(): Promise<{ today: number; month: number }> {
 // --- Main search function ---
 export interface SerpSearchParams {
   engine: string;
-  q: string;
-  [key: string]: string;
+  q?: string;  // Optional since some engines use search_query, find_desc, etc.
+  [key: string]: string | undefined;
 }
 
 export interface SerpResult {
@@ -175,7 +177,8 @@ export async function serpSearch(params: SerpSearchParams): Promise<SerpResult> 
     });
 
     // Cache it (call_cost = 1 for a real API call)
-    await setCache(key, engine, params.q, data, 1);
+    const queryLabel = params.q || params.search_query || params.find_desc || key.slice(0, 20);
+    await setCache(key, engine, queryLabel, data, 1);
 
     return {
       data,

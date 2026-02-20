@@ -154,4 +154,7 @@ export const PLATFORM_COLORS: Record<Platform, string> = {
   [Platform.OwnSales]: '#10b981',
   [Platform.OwnTraffic]: '#8b5cf6',
   [Platform.MetaAds]: '#3b82f6',
+  [Platform.YouTube]: '#FF0000',
+  [Platform.GoogleNews]: '#4285F4',
+  [Platform.GoogleMaps]: '#34A853',
 };

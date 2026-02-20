@@ -16,6 +16,9 @@ enum Platform {
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
   MetaAds = 'MetaAds',
+  YouTube = 'YouTube',
+  GoogleNews = 'GoogleNews',
+  GoogleMaps = 'GoogleMaps',
 }
 
 interface SignalData {
@@ -85,11 +88,11 @@ async function mapWithConcurrency<T, R>(
 
 // --- Scoring ---
 const WEIGHTS: Record<string, number> = {
-  OwnSales: 3.0, TikTok: 2.0, OwnTraffic: 1.8, Reddit: 1.5,
-  Pinterest: 1.2, GoogleSearch: 1.0, MetaAds: 0.8, Wildchat: 0.6,
-  Yelp: 0.5, DoorDash: 0.5, RedditPushshift: 0.3,
+  OwnSales: 3.0, TikTok: 2.5, YouTube: 2.2, OwnTraffic: 1.8, Reddit: 1.5,
+  GoogleNews: 1.4, Pinterest: 1.2, GoogleSearch: 1.0, MetaAds: 0.8, Wildchat: 0.6,
+  Yelp: 0.5, DoorDash: 0.5, GoogleMaps: 0.5, RedditPushshift: 0.3,
 };
-const SUPPLY = new Set(['Yelp', 'DoorDash']);
+const SUPPLY = new Set(['Yelp', 'DoorDash', 'GoogleMaps']);
 
 const demandScore = (signals: SignalData[]): number => {
   let tw = 0, tws = 0;
@@ -195,16 +198,27 @@ async function fetchReddit(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.Reddit, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchTikTokProxy(term: string): Promise<SignalData> {
+async function fetchTikTokSerp(term: string): Promise<SignalData> {
+  // Use SerpAPI Google search with site:tiktok.com for much better coverage than Reddit proxy
   try {
-    const { data } = await axios.get('https://www.reddit.com/search.json', {
-      params: { q: `"${term}" site:tiktok.com`, sort: 'new', limit: 50 },
-      timeout: EXTERNAL_TIMEOUT_MS,
-    });
-    const posts = data.data.children;
-    const now = Date.now() / 1000;
-    const recent = posts.filter((p: any) => (now - p.data.created_utc) < 172800).length;
-    return { platform: Platform.TikTok, currentIntensity: Math.min(100, posts.length * 5), velocity: recent * 10, history: [] };
+    const result = await serpSearch({ engine: 'google', q: `${term} food site:tiktok.com`, num: '50' });
+    if (!result.data) return { platform: Platform.TikTok, currentIntensity: 0, velocity: 0, history: [] };
+    const organic = result.data.organic_results || [];
+    // Count results and check for recency signals in snippets
+    const count = organic.length;
+    let recentSignals = 0;
+    for (const r of organic) {
+      const snippet = (r.snippet || '').toLowerCase();
+      if (snippet.includes('day') || snippet.includes('hour') || snippet.includes('new') || snippet.includes('trending')) {
+        recentSignals++;
+      }
+    }
+    return {
+      platform: Platform.TikTok,
+      currentIntensity: Math.min(100, count * 2),
+      velocity: Math.min(20, recentSignals * 3),
+      history: [],
+    };
   } catch { return { platform: Platform.TikTok, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
@@ -216,6 +230,81 @@ async function fetchPinterestProxy(term: string): Promise<SignalData> {
     });
     return { platform: Platform.Pinterest, currentIntensity: Math.min(100, data.data.children.length * 10), velocity: 0, history: [] };
   } catch { return { platform: Platform.Pinterest, currentIntensity: 0, velocity: 0, history: [] }; }
+}
+
+async function fetchYouTube(term: string): Promise<SignalData> {
+  // SerpAPI YouTube search - high signal for food trends
+  try {
+    const result = await serpSearch({ engine: 'youtube', search_query: `${term} recipe food` });
+    if (!result.data) return { platform: Platform.YouTube, currentIntensity: 0, velocity: 0, history: [] };
+    const videos = result.data.video_results || [];
+    let totalViews = 0;
+    let recentCount = 0;
+    for (const v of videos.slice(0, 20)) {
+      // Parse view counts like "1.2M views" or "500K views"
+      const viewStr = v.views || '';
+      let views = 0;
+      const match = viewStr.match(/([\d.]+)\s*([KMB])?/i);
+      if (match) {
+        views = parseFloat(match[1]);
+        if (match[2]?.toUpperCase() === 'K') views *= 1000;
+        else if (match[2]?.toUpperCase() === 'M') views *= 1000000;
+        else if (match[2]?.toUpperCase() === 'B') views *= 1000000000;
+      }
+      totalViews += views;
+      // Check for recent uploads
+      const published = (v.published_date || '').toLowerCase();
+      if (published.includes('day') || published.includes('hour') || published.includes('week')) {
+        recentCount++;
+      }
+    }
+    // Scale: 1M total views across top 20 = intensity 100
+    const intensity = Math.min(100, Math.round(totalViews / 10000));
+    const velocity = Math.min(20, recentCount * 2);
+    return { platform: Platform.YouTube, currentIntensity: intensity, velocity, history: [] };
+  } catch { return { platform: Platform.YouTube, currentIntensity: 0, velocity: 0, history: [] }; }
+}
+
+async function fetchGoogleNews(term: string): Promise<SignalData> {
+  // SerpAPI Google News - media coverage indicates mainstream attention
+  try {
+    const result = await serpSearch({ engine: 'google_news', q: `${term} food restaurant` });
+    if (!result.data) return { platform: Platform.GoogleNews, currentIntensity: 0, velocity: 0, history: [] };
+    const articles = result.data.news_results || [];
+    let recentCount = 0;
+    for (const a of articles) {
+      const date = (a.date || '').toLowerCase();
+      if (date.includes('hour') || date.includes('day') || date.includes('yesterday')) {
+        recentCount++;
+      }
+    }
+    // More articles = more mainstream coverage
+    const intensity = Math.min(100, articles.length * 5);
+    const velocity = Math.min(20, recentCount * 4);
+    return { platform: Platform.GoogleNews, currentIntensity: intensity, velocity, history: [] };
+  } catch { return { platform: Platform.GoogleNews, currentIntensity: 0, velocity: 0, history: [] }; }
+}
+
+async function fetchGoogleMaps(term: string): Promise<SignalData> {
+  // SerpAPI Google Maps - local supply density (how many places serve this)
+  try {
+    const result = await serpSearch({ engine: 'google_maps', q: `${term} ${REGION}`, type: 'search' });
+    if (!result.data) return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] };
+    const places = result.data.local_results || [];
+    // Count establishments and average rating
+    const count = places.length;
+    let totalRating = 0;
+    let ratedCount = 0;
+    for (const p of places) {
+      if (p.rating) {
+        totalRating += p.rating;
+        ratedCount++;
+      }
+    }
+    // High count = saturated supply, scale: 20 places = 100 intensity
+    const intensity = Math.min(100, count * 5);
+    return { platform: Platform.GoogleMaps, currentIntensity: intensity, velocity: 0, history: [] };
+  } catch { return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
 async function fetchWildchat(term: string): Promise<SignalData> {
@@ -433,19 +522,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
-      const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic] = await Promise.all([
+      const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, youtube, news, maps] = await Promise.all([
         fetchYelp(item.term),
         fetchReddit(item.term),
         fetchSerpTrends(item.term),
-        fetchTikTokProxy(item.term),
+        fetchTikTokSerp(item.term),
         fetchPinterestProxy(item.term),
         fetchSerpDelivery(item.term),
         fetchWildchat(item.term),
         fetchSquareSales(item.term),
         fetchGA4Traffic(item.term),
+        fetchYouTube(item.term),
+        fetchGoogleNews(item.term),
+        fetchGoogleMaps(item.term),
       ]);
 
-      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic];
+      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, youtube, news, maps];
       const ds = demandScore(signals);
       const ss = supplyScore(signals);
       const ud = unmetDemand(ds, ss);

@@ -2,28 +2,34 @@ import { SignalData, Platform } from '../types';
 
 const PLATFORM_WEIGHTS: Record<Platform, number> = {
   [Platform.OwnSales]: 3.0,     // Strongest signal: actual purchases
-  [Platform.TikTok]: 2.0,       // High viral potential (Demand)
+  [Platform.TikTok]: 2.5,       // High viral potential (Demand)
+  [Platform.YouTube]: 2.2,      // Video content traction (Demand)
   [Platform.OwnTraffic]: 1.8,   // Your own page views
   [Platform.Reddit]: 1.5,       // Community interest (Demand)
+  [Platform.GoogleNews]: 1.4,   // Media coverage (Demand)
   [Platform.Pinterest]: 1.2,    // Visual interest / planning (Demand)
   [Platform.GoogleSearch]: 1.0,  // General intent
   [Platform.MetaAds]: 0.8,      // Ad performance feedback
   [Platform.Wildchat]: 0.6,     // LLM curiosity signal
   [Platform.Yelp]: 0.5,         // Established supply (Supply indicator)
   [Platform.DoorDash]: 0.5,     // Established supply (Supply indicator)
+  [Platform.GoogleMaps]: 0.5,   // Local supply density (Supply indicator)
   [Platform.RedditPushshift]: 0.3,
 };
 
 const SUPPLY_PLATFORMS = new Set<Platform>([
   Platform.Yelp,
   Platform.DoorDash,
+  Platform.GoogleMaps,
 ]);
 
 const DEMAND_PLATFORMS = new Set<Platform>([
   Platform.OwnSales,
   Platform.TikTok,
+  Platform.YouTube,
   Platform.OwnTraffic,
   Platform.Reddit,
+  Platform.GoogleNews,
   Platform.Pinterest,
   Platform.GoogleSearch,
   Platform.MetaAds,
