@@ -311,13 +311,18 @@ async function fetchGA4Traffic(term: string): Promise<SignalData> {
 
 async function getHistory(trendId: string, limit = 12) {
   if (!supabase) return [];
-  const { data } = await supabase
-    .from('trend_history')
-    .select('timestamp, demand_score, supply_score, unmet_demand_score, breakout_probability, raw_signals')
-    .eq('trend_id', trendId)
-    .order('timestamp', { ascending: true })
-    .limit(limit);
-  return data || [];
+  try {
+    const { data } = await supabase
+      .from('trend_history')
+      .select('timestamp, demand_score, supply_score, unmet_demand_score, breakout_probability, raw_signals')
+      .eq('trend_id', trendId)
+      .order('timestamp', { ascending: true })
+      .limit(limit);
+    return data || [];
+  } catch (error) {
+    console.error('getHistory error:', error);
+    return [];
+  }
 }
 
 const DEFAULT_TERMS = [
@@ -330,12 +335,17 @@ const DEFAULT_TERMS = [
 
 async function getTrackedTerms() {
   if (!supabase) return DEFAULT_TERMS.map(d => ({ ...d, id: '' }));
-  const { data } = await supabase.from('trends').select('id, term, category, neighborhood').order('created_at');
-  if (!data?.length) {
-    const { data: seeded } = await supabase.from('trends').upsert(DEFAULT_TERMS, { onConflict: 'term' }).select();
-    return (seeded || DEFAULT_TERMS).map(d => ({ id: d.id || '', term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
+  try {
+    const { data } = await supabase.from('trends').select('id, term, category, neighborhood').order('created_at');
+    if (!data?.length) {
+      const { data: seeded } = await supabase.from('trends').upsert(DEFAULT_TERMS, { onConflict: 'term' }).select();
+      return (seeded || DEFAULT_TERMS).map(d => ({ id: d.id || '', term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
+    }
+    return data.map(d => ({ id: d.id, term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
+  } catch (error) {
+    console.error('Supabase getTrackedTerms error:', error);
+    return DEFAULT_TERMS.map(d => ({ ...d, id: '' }));
   }
-  return data.map(d => ({ id: d.id, term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
 }
 
 // ========== HANDLER ==========

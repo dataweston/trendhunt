@@ -36,50 +36,64 @@ function cacheKey(engine: string, params: Record<string, string>): string {
 // --- Read cache ---
 async function getCache(key: string, ttlHours: number): Promise<any | null> {
   if (!supabase) return null;
-  const { data } = await supabase
-    .from('serp_cache')
-    .select('response, created_at')
-    .eq('cache_key', key)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (!data) return null;
-  const age = (Date.now() - new Date(data.created_at).getTime()) / 3_600_000;
-  if (age > ttlHours) return null;
-  return data.response;
+  try {
+    const { data } = await supabase
+      .from('serp_cache')
+      .select('response, created_at')
+      .eq('cache_key', key)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!data) return null;
+    const age = (Date.now() - new Date(data.created_at).getTime()) / 3_600_000;
+    if (age > ttlHours) return null;
+    return data.response;
+  } catch (error) {
+    console.error('[SerpGovernor] Cache read error:', error);
+    return null;
+  }
 }
 
 // --- Write cache ---
 async function setCache(key: string, engine: string, query: string, response: any, callCost: number) {
   if (!supabase) return;
-  await supabase.from('serp_cache').insert({
-    cache_key: key,
-    engine,
-    query,
-    response,
-    call_cost: callCost,
-    created_at: new Date().toISOString(),
-  });
+  try {
+    await supabase.from('serp_cache').insert({
+      cache_key: key,
+      engine,
+      query,
+      response,
+      call_cost: callCost,
+      created_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('[SerpGovernor] Cache write error:', error);
+  }
 }
 
 // --- Budget check ---
 async function getUsage(): Promise<{ today: number; month: number }> {
   if (!supabase) return { today: 0, month: 0 };
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-  const [dayResult, monthResult] = await Promise.all([
-    supabase.from('serp_cache').select('call_cost', { count: 'exact', head: false })
-      .gte('created_at', todayStart).gt('call_cost', 0),
-    supabase.from('serp_cache').select('call_cost', { count: 'exact', head: false })
-      .gte('created_at', monthStart).gt('call_cost', 0),
-  ]);
+    const [dayResult, monthResult] = await Promise.all([
+      supabase.from('serp_cache').select('call_cost', { count: 'exact', head: false })
+        .gte('created_at', todayStart).gt('call_cost', 0),
+      supabase.from('serp_cache').select('call_cost', { count: 'exact', head: false })
+        .gte('created_at', monthStart).gt('call_cost', 0),
+    ]);
 
-  return {
-    today: dayResult.count || 0,
-    month: monthResult.count || 0,
-  };
+    return {
+      today: dayResult.count || 0,
+      month: monthResult.count || 0,
+    };
+  } catch (error) {
+    console.error('[SerpGovernor] Usage query error:', error);
+    return { today: 0, month: 0 };
+  }
 }
 
 // --- Main search function ---
