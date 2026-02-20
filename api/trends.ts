@@ -46,6 +46,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN;
 const GA4_PROPERTY_ID = process.env.GA4_PROPERTY_ID;
+const EXTERNAL_TIMEOUT_MS = Number(process.env.EXTERNAL_TIMEOUT_MS || 5000);
+const TERM_PROCESS_CONCURRENCY = Number(process.env.TERM_PROCESS_CONCURRENCY || 3);
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -58,6 +60,28 @@ const DEMO_TERMS = new Set([
   'Detroit-style Pizza',
   'Ube Lattes',
 ]);
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const current = nextIndex++;
+      if (current >= items.length) return;
+      results[current] = await mapper(items[current], current);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
 
 // --- Scoring ---
 const WEIGHTS: Record<string, number> = {
@@ -160,7 +184,10 @@ async function fetchYelp(term: string): Promise<SignalData> {
 
 async function fetchReddit(term: string): Promise<SignalData> {
   try {
-    const { data } = await axios.get('https://www.reddit.com/search.json', { params: { q: term, sort: 'new', limit: 25 } });
+    const { data } = await axios.get('https://www.reddit.com/search.json', {
+      params: { q: term, sort: 'new', limit: 25 },
+      timeout: EXTERNAL_TIMEOUT_MS,
+    });
     const posts = data.data.children;
     const now = Date.now() / 1000;
     const recent = posts.filter((p: any) => (now - p.data.created_utc) < 86400).length;
@@ -170,7 +197,10 @@ async function fetchReddit(term: string): Promise<SignalData> {
 
 async function fetchTikTokProxy(term: string): Promise<SignalData> {
   try {
-    const { data } = await axios.get('https://www.reddit.com/search.json', { params: { q: `"${term}" site:tiktok.com`, sort: 'new', limit: 50 } });
+    const { data } = await axios.get('https://www.reddit.com/search.json', {
+      params: { q: `"${term}" site:tiktok.com`, sort: 'new', limit: 50 },
+      timeout: EXTERNAL_TIMEOUT_MS,
+    });
     const posts = data.data.children;
     const now = Date.now() / 1000;
     const recent = posts.filter((p: any) => (now - p.data.created_utc) < 172800).length;
@@ -180,7 +210,10 @@ async function fetchTikTokProxy(term: string): Promise<SignalData> {
 
 async function fetchPinterestProxy(term: string): Promise<SignalData> {
   try {
-    const { data } = await axios.get('https://www.reddit.com/search.json', { params: { q: `"${term}" site:pinterest.com`, sort: 'new', limit: 25 } });
+    const { data } = await axios.get('https://www.reddit.com/search.json', {
+      params: { q: `"${term}" site:pinterest.com`, sort: 'new', limit: 25 },
+      timeout: EXTERNAL_TIMEOUT_MS,
+    });
     return { platform: Platform.Pinterest, currentIntensity: Math.min(100, data.data.children.length * 10), velocity: 0, history: [] };
   } catch { return { platform: Platform.Pinterest, currentIntensity: 0, velocity: 0, history: [] }; }
 }
@@ -189,6 +222,7 @@ async function fetchWildchat(term: string): Promise<SignalData> {
   try {
     const { data } = await axios.get('https://datasets-server.huggingface.co/search', {
       params: { dataset: 'allenai/WildChat-1M', config: 'default', split: 'train', query: term, offset: 0, limit: 10 },
+      timeout: EXTERNAL_TIMEOUT_MS,
     });
     return { platform: Platform.Wildchat, currentIntensity: Math.min(100, (data.rows?.length || 0) * 10), velocity: 0, history: [] };
   } catch { return { platform: Platform.Wildchat, currentIntensity: 0, velocity: 0, history: [] }; }
@@ -209,7 +243,10 @@ async function fetchSquareSales(term: string): Promise<SignalData> {
         sort: { sort_field: 'CREATED_AT', sort_order: 'DESC' },
       },
       limit: 500,
-    }, { headers: { Authorization: `Bearer ${SQUARE_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } });
+    }, {
+      headers: { Authorization: `Bearer ${SQUARE_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+      timeout: EXTERNAL_TIMEOUT_MS,
+    });
 
     const orders = data.orders || [];
     const tl = term.toLowerCase();
@@ -286,7 +323,7 @@ async function getGA4AccessToken(): Promise<string | null> {
     const { data } = await axios.post('https://oauth2.googleapis.com/token', {
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: jwt,
-    });
+    }, { timeout: EXTERNAL_TIMEOUT_MS });
     return data.access_token;
   } catch (e) { console.error('GA4 auth error:', e); return null; }
 }
@@ -322,7 +359,7 @@ async function fetchGA4Traffic(term: string): Promise<SignalData> {
           },
         },
       },
-      { headers: { Authorization: `Bearer ${_ga4Token}` } }
+      { headers: { Authorization: `Bearer ${_ga4Token}` }, timeout: EXTERNAL_TIMEOUT_MS }
     );
 
     const rows = data.rows || [];
@@ -395,7 +432,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json([]);
     }
 
-    const trends: TrendEntity[] = await Promise.all(terms.map(async (item) => {
+    const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
       const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic] = await Promise.all([
         fetchYelp(item.term),
         fetchReddit(item.term),
@@ -454,7 +491,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         signals, supplyScore: ss, demandScore: ds, unmetDemandScore: ud, breakoutProbability: bp,
         predictedBreakoutWeek: predicted,
       };
-    }));
+    });
 
     res.status(200).json(trends);
   } catch (error) {

@@ -10,6 +10,8 @@ import crypto from 'crypto';
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SERPAPI_TIMEOUT_MS = Number(process.env.SERPAPI_TIMEOUT_MS || 5000);
+const AUTH_FAILURE_COOLDOWN_MS = Number(process.env.SERPAPI_AUTH_FAILURE_COOLDOWN_MS || 10 * 60_000);
 
 const supabase: SupabaseClient | null =
   SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
@@ -17,6 +19,8 @@ const supabase: SupabaseClient | null =
 // --- Budget ---
 const MONTHLY_BUDGET = 10_000; // calls
 const DAILY_SOFT_CAP = 400;   // ~$1.60/day leaves headroom
+
+let authFailureUntil = 0;
 
 // --- TTL by query type (hours) ---
 const TTL: Record<string, number> = {
@@ -139,6 +143,14 @@ export async function serpSearch(params: SerpSearchParams): Promise<SerpResult> 
     };
   }
 
+  if (Date.now() < authFailureUntil) {
+    return {
+      data: null,
+      fromCache: false,
+      callsRemaining: { today: DAILY_SOFT_CAP, month: MONTHLY_BUDGET },
+    };
+  }
+
   // Budget gate
   const usage = await getUsage();
   if (usage.month >= MONTHLY_BUDGET) {
@@ -154,6 +166,7 @@ export async function serpSearch(params: SerpSearchParams): Promise<SerpResult> 
   try {
     const { data } = await axios.get('https://serpapi.com/search.json', {
       params: { engine, ...rest, api_key: SERPAPI_KEY },
+      timeout: SERPAPI_TIMEOUT_MS,
     });
 
     // Cache it (call_cost = 1 for a real API call)
@@ -165,7 +178,17 @@ export async function serpSearch(params: SerpSearchParams): Promise<SerpResult> 
       callsRemaining: { today: DAILY_SOFT_CAP - usage.today - 1, month: MONTHLY_BUDGET - usage.month - 1 },
     };
   } catch (err) {
-    console.error('[SerpGovernor] API error:', err);
+    if (axios.isAxiosError(err) && err.response?.status === 401) {
+      authFailureUntil = Date.now() + AUTH_FAILURE_COOLDOWN_MS;
+      console.error(`[SerpGovernor] API error: status=401 Unauthorized. Live calls disabled for ${Math.round(AUTH_FAILURE_COOLDOWN_MS / 1000)}s.`);
+    } else if (axios.isAxiosError(err)) {
+      const apiMessage = typeof err.response?.data === 'object' && err.response?.data
+        ? (err.response?.data as { error?: string }).error
+        : undefined;
+      console.error(`[SerpGovernor] API error: status=${err.response?.status ?? 'unknown'} ${apiMessage || err.message}`);
+    } else {
+      console.error(`[SerpGovernor] API error: ${String(err)}`);
+    }
     return { data: null, fromCache: false, callsRemaining: { today: DAILY_SOFT_CAP - usage.today, month: MONTHLY_BUDGET - usage.month } };
   }
 }
