@@ -8,11 +8,11 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
+import { serpSearch } from './serp-governor';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const YELP_API_KEY = process.env.YELP_API_KEY;
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const GEMINI_API_KEY = process.env.API_KEY;
 const REGION = 'Minneapolis';
 
@@ -48,16 +48,14 @@ async function discoverYelp() {
   } catch { return []; }
 }
 
-// --- SerpAPI Rising Queries ---
+// --- SerpAPI Rising Queries (via governor — 48h TTL, max 3 calls) ---
 async function discoverRisingQueries(seedTerms: string[]) {
-  if (!SERPAPI_KEY) return [];
   const results: { term: string; score: number }[] = [];
   for (const seed of seedTerms.slice(0, 3)) {
     try {
-      const { data } = await axios.get('https://serpapi.com/search.json', {
-        params: { engine: 'google_trends', q: seed, data_type: 'RELATED_QUERIES', api_key: SERPAPI_KEY },
-      });
-      const rising = data?.related_queries?.rising || [];
+      const result = await serpSearch({ engine: 'google_trends', q: seed, data_type: 'RELATED_QUERIES' });
+      if (!result.data) continue;
+      const rising = result.data?.related_queries?.rising || [];
       for (const q of rising) {
         if (q.query && !q.query.toLowerCase().includes(seed.toLowerCase())) {
           results.push({ term: q.query, score: q.value || 50 });

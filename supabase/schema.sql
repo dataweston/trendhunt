@@ -38,6 +38,19 @@ create table if not exists page_drafts (
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
+-- SerpAPI Cache: governor stores results here to avoid redundant calls
+create table if not exists serp_cache (
+  id uuid default uuid_generate_v4() primary key,
+  cache_key text not null,
+  engine text not null,
+  query text,
+  response jsonb,
+  call_cost integer default 0,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+create index if not exists idx_serp_cache_key on serp_cache(cache_key);
+create index if not exists idx_serp_cache_created on serp_cache(created_at);
+
 -- Discovery Queue: Potential trends found by the agent, waiting for approval
 create table if not exists discovery_queue (
   id uuid default uuid_generate_v4() primary key,

@@ -74,14 +74,22 @@ const App = () => {
         <div className="p-4 border-t border-slate-800">
            <div className="bg-slate-900/50 p-3 rounded border border-slate-800">
               <div className="text-xs text-slate-500 uppercase font-bold mb-2">System Status</div>
-              <div className="flex items-center gap-2 text-xs text-emerald-400">
-                  <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-                  Ingesting Reddit Stream
-              </div>
-              <div className="flex items-center gap-2 text-xs text-emerald-400 mt-1">
-                  <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-                  Google Trends Sync Active
-              </div>
+              {loading ? (
+                <div className="flex items-center gap-2 text-xs text-yellow-400">
+                  <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                  Fetching signals…
+                </div>
+              ) : error ? (
+                <div className="flex items-center gap-2 text-xs text-red-400">
+                  <div className="w-2 h-2 bg-red-400 rounded-full"></div>
+                  API error
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-emerald-400">
+                  <div className="w-2 h-2 bg-emerald-400 rounded-full"></div>
+                  {trends.length} terms tracked
+                </div>
+              )}
            </div>
         </div>
       </aside>
@@ -187,34 +195,46 @@ const App = () => {
               {/* Right Column / Feed */}
               <div className="space-y-4">
                  <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4">
-                    <h3 className="text-sm font-medium text-slate-200 mb-3">Live Signal Feed</h3>
+                    <h3 className="text-sm font-medium text-slate-200 mb-3">Top Signals</h3>
                     <div className="space-y-3">
-                        {[
-                            { platform: 'TikTok', text: 'Viral: "Mochi Donuts" +400% views in North Loop', time: '2m ago', color: 'text-cyan-400' },
-                            { platform: 'Reddit', text: 'r/TwinCities: "Where to find good birria?" (15 comments)', time: '12m ago', color: 'text-orange-400' },
-                            { platform: 'Google', text: 'Search spike: "Korean Corn Dogs near me"', time: '45m ago', color: 'text-blue-400' },
-                            { platform: 'Yelp', text: 'New Review: "Finally a place serving Ube!"', time: '1h ago', color: 'text-red-400' },
-                        ].map((item, i) => (
-                            <div key={i} className="flex gap-3 items-start border-b border-slate-700/50 pb-3 last:border-0 last:pb-0">
-                                <div className={`text-xs font-bold ${item.color} w-12 shrink-0`}>{item.platform}</div>
+                        {trends
+                          .flatMap(t => t.signals
+                            .filter(s => s.velocity > 3)
+                            .map(s => ({ term: t.term, platform: s.platform, velocity: s.velocity, intensity: s.currentIntensity }))
+                          )
+                          .sort((a, b) => b.velocity - a.velocity)
+                          .slice(0, 5)
+                          .map((item, i) => {
+                            const colors: Record<string, string> = { TikTok: 'text-cyan-400', Reddit: 'text-orange-400', GoogleSearch: 'text-blue-400', Yelp: 'text-red-400', OwnSales: 'text-emerald-400', OwnTraffic: 'text-violet-400', Pinterest: 'text-pink-400' };
+                            return (
+                              <div key={i} className="flex gap-3 items-start border-b border-slate-700/50 pb-3 last:border-0 last:pb-0">
+                                <div className={`text-xs font-bold ${colors[item.platform] || 'text-slate-400'} w-14 shrink-0`}>{item.platform.replace('GoogleSearch', 'Google')}</div>
                                 <div>
-                                    <p className="text-xs text-slate-300 leading-snug">{item.text}</p>
-                                    <span className="text-[10px] text-slate-500">{item.time}</span>
+                                  <p className="text-xs text-slate-300 leading-snug">{item.term}: intensity {item.intensity}, velocity +{item.velocity}</p>
                                 </div>
-                            </div>
-                        ))}
+                              </div>
+                            );
+                          })}
+                        {trends.flatMap(t => t.signals.filter(s => s.velocity > 3)).length === 0 && (
+                          <p className="text-xs text-slate-500">No high-velocity signals right now.</p>
+                        )}
                     </div>
                  </div>
 
-                 <div className="bg-gradient-to-br from-indigo-900/50 to-slate-800/50 rounded-lg border border-indigo-500/20 p-4">
-                    <h3 className="text-sm font-medium text-indigo-200 mb-2">Predictive Insight</h3>
-                    <p className="text-xs text-indigo-100/70 mb-4">
-                        Based on current graph velocity, <strong>Birria Tacos</strong> are projected to reach peak saturation in Northeast Minneapolis within 14 days. Consider menu diversification.
-                    </p>
-                    <button className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded transition-colors">
-                        View Full Report
-                    </button>
-                 </div>
+                 {(() => {
+                    const top = [...trends].sort((a, b) => b.breakoutProbability - a.breakoutProbability)[0];
+                    if (!top || top.breakoutProbability < 30) return null;
+                    return (
+                      <div className="bg-gradient-to-br from-indigo-900/50 to-slate-800/50 rounded-lg border border-indigo-500/20 p-4">
+                        <h3 className="text-sm font-medium text-indigo-200 mb-2">Predictive Insight</h3>
+                        <p className="text-xs text-indigo-100/70 mb-2">
+                          <strong>{top.term}</strong> has a {top.breakoutProbability}% breakout probability in {top.neighborhood}.
+                          {top.predictedBreakoutWeek > 0 && <> Estimated breakout in ~{top.predictedBreakoutWeek} weeks.</>}
+                          {' '}Unmet demand score: {top.unmetDemandScore}/100.
+                        </p>
+                      </div>
+                    );
+                 })()}
               </div>
            </div>
            </>)}

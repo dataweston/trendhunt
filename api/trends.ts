@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
+import { serpSearch } from './serp-governor';
 
 // --- Types (standalone for serverless) ---
 enum Platform {
@@ -101,13 +102,12 @@ const predictBreakout = (hist: { week: number; score: number }[], cur: number, t
 // ========== FETCHERS ==========
 
 async function fetchSerpTrends(term: string): Promise<SignalData> {
-  if (!SERPAPI_KEY) return { platform: Platform.GoogleSearch, currentIntensity: 0, velocity: 0, history: [] };
+  const empty: SignalData = { platform: Platform.GoogleSearch, currentIntensity: 0, velocity: 0, history: [] };
   try {
-    const { data } = await axios.get('https://serpapi.com/search.json', {
-      params: { engine: 'google_trends', q: term, geo: 'US-MN', data_type: 'TIMESERIES', api_key: SERPAPI_KEY },
-    });
-    const tl = data?.interest_over_time?.timeline_data;
-    if (!tl?.length) return { platform: Platform.GoogleSearch, currentIntensity: 0, velocity: 0, history: [] };
+    const result = await serpSearch({ engine: 'google_trends', q: term, geo: 'US-MN', data_type: 'TIMESERIES' });
+    if (!result.data) return empty;
+    const tl = result.data?.interest_over_time?.timeline_data;
+    if (!tl?.length) return empty;
     const vals = tl.map((t: any) => t.values?.[0]?.extracted_value ?? 0);
     const last = vals[vals.length - 1] || 0;
     const prev = vals[vals.length - 2] || 0;
@@ -117,17 +117,16 @@ async function fetchSerpTrends(term: string): Promise<SignalData> {
       velocity: last - prev,
       history: vals.slice(-12).map((v: number, i: number) => ({ week: i + 1, value: v })),
     };
-  } catch { return { platform: Platform.GoogleSearch, currentIntensity: 0, velocity: 0, history: [] }; }
+  } catch { return empty; }
 }
 
 async function fetchSerpDelivery(term: string): Promise<SignalData> {
-  if (!SERPAPI_KEY) return { platform: Platform.DoorDash, currentIntensity: 0, velocity: 0, history: [] };
+  const empty: SignalData = { platform: Platform.DoorDash, currentIntensity: 0, velocity: 0, history: [] };
   try {
-    const { data } = await axios.get('https://serpapi.com/search.json', {
-      params: { engine: 'google_trends', q: `${term} delivery`, geo: 'US-MN', data_type: 'TIMESERIES', api_key: SERPAPI_KEY },
-    });
-    const tl = data?.interest_over_time?.timeline_data;
-    if (!tl?.length) return { platform: Platform.DoorDash, currentIntensity: 0, velocity: 0, history: [] };
+    const result = await serpSearch({ engine: 'google_trends', q: `${term} delivery`, geo: 'US-MN', data_type: 'TIMESERIES' });
+    if (!result.data) return empty;
+    const tl = result.data?.interest_over_time?.timeline_data;
+    if (!tl?.length) return empty;
     const vals = tl.map((t: any) => t.values?.[0]?.extracted_value ?? 0);
     return {
       platform: Platform.DoorDash,
@@ -135,7 +134,7 @@ async function fetchSerpDelivery(term: string): Promise<SignalData> {
       velocity: 0,
       history: vals.slice(-12).map((v: number, i: number) => ({ week: i + 1, value: v })),
     };
-  } catch { return { platform: Platform.DoorDash, currentIntensity: 0, velocity: 0, history: [] }; }
+  } catch { return empty; }
 }
 
 async function fetchYelp(term: string): Promise<SignalData> {
@@ -225,10 +224,87 @@ async function fetchSquareSales(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.OwnSales, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-// GA4 stub — requires service account JWT exchange
-async function fetchGA4Traffic(_term: string): Promise<SignalData> {
-  // TODO: wire once GOOGLE_SERVICE_ACCOUNT_KEY env var is set
-  return { platform: Platform.OwnTraffic, currentIntensity: 0, velocity: 0, history: [] };
+// --- GA4 Data API via service account ---
+async function getGA4AccessToken(): Promise<string | null> {
+  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!b64) return null;
+  try {
+    const sa = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
+    // Build JWT
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(JSON.stringify({
+      iss: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/analytics.readonly',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    })).toString('base64url');
+    const crypto = await import('crypto');
+    const signature = crypto.sign('RSA-SHA256', Buffer.from(`${header}.${payload}`), sa.private_key)
+      .toString('base64url');
+    const jwt = `${header}.${payload}.${signature}`;
+    const { data } = await axios.post('https://oauth2.googleapis.com/token', {
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
+    });
+    return data.access_token;
+  } catch (e) { console.error('GA4 auth error:', e); return null; }
+}
+
+let _ga4Token: string | null = null;
+let _ga4TokenExp = 0;
+
+async function fetchGA4Traffic(term: string): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.OwnTraffic, currentIntensity: 0, velocity: 0, history: [] };
+  if (!GA4_PROPERTY_ID || !process.env.GOOGLE_SERVICE_ACCOUNT_KEY) return empty;
+  try {
+    // Cache token for ~50 min
+    if (!_ga4Token || Date.now() > _ga4TokenExp) {
+      _ga4Token = await getGA4AccessToken();
+      _ga4TokenExp = Date.now() + 50 * 60_000;
+    }
+    if (!_ga4Token) return empty;
+
+    // Query last 28 days, page views where page title or path contains the term
+    const { data } = await axios.post(
+      `https://analyticsdata.googleapis.com/v1beta/properties/${GA4_PROPERTY_ID}:runReport`,
+      {
+        dateRanges: [
+          { startDate: '28daysAgo', endDate: '14daysAgo' },
+          { startDate: '14daysAgo', endDate: 'today' },
+        ],
+        dimensions: [{ name: 'dateRange' }],
+        metrics: [{ name: 'screenPageViews' }],
+        dimensionFilter: {
+          filter: {
+            fieldName: 'pageTitle',
+            stringFilter: { matchType: 'CONTAINS', value: term, caseSensitive: false },
+          },
+        },
+      },
+      { headers: { Authorization: `Bearer ${_ga4Token}` } }
+    );
+
+    const rows = data.rows || [];
+    // dateRange 0 = older period, 1 = recent period
+    let older = 0, recent = 0;
+    for (const r of rows) {
+      const range = r.dimensionValues?.[0]?.value;
+      const views = parseInt(r.metricValues?.[0]?.value || '0', 10);
+      if (range === 'date_range_0') older = views;
+      else if (range === 'date_range_1') recent = views;
+    }
+    const total = older + recent;
+    const velocity = older > 0 ? Math.round(((recent - older) / older) * 10) : (recent > 0 ? 10 : 0);
+
+    return {
+      platform: Platform.OwnTraffic,
+      currentIntensity: Math.min(100, Math.round(total / 5)), // scale: 500 views = 100
+      velocity: Math.max(-20, Math.min(20, velocity)),
+      history: [],
+    };
+  } catch (e) { console.error('GA4 fetch error:', e); return empty; }
 }
 
 // ========== SUPABASE HELPERS ==========
