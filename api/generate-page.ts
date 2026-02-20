@@ -46,6 +46,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const scores = latest || { demand_score: 0, supply_score: 0, unmet_demand_score: 0, breakout_probability: 0 };
 
+    // Get raw signals for richer context
+    const { data: history } = await supabase
+      .from('trend_history')
+      .select('raw_signals')
+      .eq('trend_id', trendId)
+      .order('timestamp', { ascending: false })
+      .limit(1)
+      .single();
+
+    const signals = (history?.raw_signals || []) as { platform: string; currentIntensity: number; velocity: number }[];
+    const signalSummary = signals
+      .filter(s => s.currentIntensity > 0)
+      .map(s => `${s.platform}: intensity ${s.currentIntensity}/100, velocity ${s.velocity > 0 ? '+' : ''}${s.velocity}`)
+      .join('; ');
+
     // Generate with Gemini
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -54,10 +69,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 Term: ${trend.term}
 Category: ${trend.category}
 Neighborhood demand: ${trend.neighborhood}
-Demand score: ${scores.demand_score}/100
-Supply gap: ${scores.unmet_demand_score}/100
+Demand score: ${scores.demand_score}/100 (how much people want this)
+Supply gap: ${scores.unmet_demand_score}/100 (how underserved the market is)
+Breakout probability: ${scores.breakout_probability}/100
+
+Live signal data: ${signalSummary || 'No live signals available'}
 
 The page should feel artisanal, local, and seasonal. Local Effort sources 100% locally in Minnesota. The tone is warm but confident — like a chef who knows their craft.
+
+If the demand score and signals show this is trending strongly, lean into urgency and excitement. If the supply gap is high, emphasize that Local Effort is among the first to offer this locally.
 
 Generate:
 1. A page title (short, compelling)

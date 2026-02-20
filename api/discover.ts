@@ -293,7 +293,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     // Determine location — use zip code if provided, else default
     const zip = typeof req.query.zip === 'string' ? req.query.zip.trim() : '';
-    const location = zip.length === 5 ? zip : 'Minneapolis, MN';
+    const location = zip.length === 5 ? zip : 'Minneapolis-St Paul, MN';
 
     // Get current tracked terms for seed queries
     const { data: tracked } = await supabase.from('trends').select('term');

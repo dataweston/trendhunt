@@ -43,7 +43,7 @@ interface TrendEntity {
 }
 
 // --- Config ---
-const REGION = 'Minneapolis';
+const REGION = 'Minneapolis-St Paul, MN';
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;

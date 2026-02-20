@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox } from 'lucide-react';
+import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox, RefreshCw } from 'lucide-react';
 import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
 import { OpportunityTable } from './components/OpportunityTable';
@@ -15,13 +15,15 @@ const App = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeSearch, setActiveSearch] = useState(''); // committed search
   const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue'>('dashboard');
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
-  const loadData = useCallback(async (query = '') => {
+  const loadData = useCallback(async (query = '', forceRefresh = false) => {
     setLoading(true);
     try {
-      const data = await trendService.getTrends(query);
+      const data = await trendService.getTrends(query, forceRefresh);
       setTrends(data);
       setError(null);
+      setLastRefresh(new Date());
     } catch (error) {
       console.error("Failed to fetch trends", error);
       setError("Failed to load trend data. Please check your connection or API keys.");
@@ -30,10 +32,15 @@ const App = () => {
     }
   }, []);
 
-  // Load tracked trends on mount (no search query)
+  // Load tracked trends on mount (uses cache if available)
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const handleForceRefresh = useCallback(() => {
+    trendService.clearCache();
+    loadData(activeSearch, true);
+  }, [loadData, activeSearch]);
 
   // Only search when user explicitly submits
   const handleSearch = useCallback(() => {
@@ -131,6 +138,15 @@ const App = () => {
               </form>
            </div>
            <div className="flex items-center gap-4 ml-4">
+              <button
+                onClick={handleForceRefresh}
+                disabled={loading}
+                title={lastRefresh ? `Last refresh: ${lastRefresh.toLocaleTimeString()}` : 'Refresh data'}
+                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-400 px-3 py-1.5 rounded-full border border-slate-700 hover:border-emerald-500/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+                <span className="hidden sm:inline">Refresh</span>
+              </button>
               <div className="text-right hidden sm:block">
                   <div className="text-xs text-slate-400">Region</div>
                   <div className="text-sm font-medium text-white flex items-center gap-1 cursor-pointer hover:text-emerald-400">

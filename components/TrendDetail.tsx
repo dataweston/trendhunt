@@ -1,8 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { TrendEntity, AnalysisResult } from '../types';
 import { analyzeTrendWithGemini } from '../services/geminiService';
-import { X, BrainCircuit, Loader2 } from 'lucide-react';
+import { X, BrainCircuit, Loader2, FileText, Copy, Check, ExternalLink } from 'lucide-react';
 import { TrendTimeSeries } from './Visualizations';
+
+interface PageDraft {
+  title: string;
+  subtitle: string;
+  description: string;
+  seoTitle: string;
+  seoDescription: string;
+  seoKeywords: string[];
+  suggestedPrice: number;
+}
 
 interface TrendDetailProps {
   trend: TrendEntity | null;
@@ -12,16 +22,64 @@ interface TrendDetailProps {
 export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [draft, setDraft] = useState<PageDraft | null>(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
     if (trend) {
       setLoading(true);
       setAnalysis(null);
+      setDraft(null);
+      setDraftError(null);
       analyzeTrendWithGemini(trend)
         .then(setAnalysis)
         .finally(() => setLoading(false));
     }
   }, [trend]);
+
+  const generateCopy = async () => {
+    if (!trend) return;
+    setDraftLoading(true);
+    setDraftError(null);
+    try {
+      const res = await fetch('/api/generate-page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trendId: trend.id }),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const data = await res.json();
+      const d = data.draft;
+      setDraft({
+        title: d.title,
+        subtitle: d.subtitle,
+        description: d.description,
+        seoTitle: d.seo_title || d.seoTitle,
+        seoDescription: d.seo_description || d.seoDescription,
+        seoKeywords: d.seo_keywords || d.seoKeywords || [],
+        suggestedPrice: d.suggested_price || d.suggestedPrice,
+      });
+    } catch (e) {
+      console.error('Generate copy failed:', e);
+      setDraftError('Failed to generate copy. Make sure this term is tracked (not a search-only result).');
+    } finally {
+      setDraftLoading(false);
+    }
+  };
+
+  const copyToClipboard = async (text: string, label: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  const copyAllAsMarkdown = () => {
+    if (!draft) return;
+    const md = `# ${draft.title}\n\n*${draft.subtitle}*\n\n${draft.description}\n\n---\n\n**SEO Title:** ${draft.seoTitle}\n**SEO Description:** ${draft.seoDescription}\n**Keywords:** ${draft.seoKeywords.join(', ')}\n**Suggested Price:** $${draft.suggestedPrice}`;
+    copyToClipboard(md, 'all');
+  };
 
   if (!trend) return null;
 
@@ -77,12 +135,14 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                   Reddit: 'Reddit', TikTok: 'TikTok', Pinterest: 'Pinterest',
                   OwnTraffic: 'Your GA4 Traffic', OwnSales: 'Your Square Sales',
                   Wildchat: 'LLM Mentions', MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
+                  YouTube: 'YouTube', GoogleNews: 'Google News', GoogleMaps: 'Google Maps Supply',
                 };
                 const colors: Record<string, string> = {
                   GoogleSearch: 'text-blue-400', Yelp: 'text-red-400', Reddit: 'text-orange-400',
                   TikTok: 'text-cyan-400', Pinterest: 'text-pink-400', OwnTraffic: 'text-violet-400',
                   OwnSales: 'text-emerald-400', DoorDash: 'text-red-500', Wildchat: 'text-yellow-400',
-                  MetaAds: 'text-blue-500',
+                  MetaAds: 'text-blue-500', YouTube: 'text-red-500', GoogleNews: 'text-blue-300',
+                  GoogleMaps: 'text-green-400',
                 };
                 return (
                   <div key={s.platform} className="bg-slate-900/50 p-3 rounded border border-slate-700/50">
@@ -138,6 +198,112 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
           <div>
              <h3 className="text-lg font-semibold text-white mb-4">Signal Source Attribution</h3>
              <TrendTimeSeries trend={trend} />
+          </div>
+
+          {/* Generate Website Copy */}
+          <div className="bg-slate-800/30 border border-slate-700 rounded-lg p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-slate-200">
+                <FileText size={20} />
+                <h3 className="font-semibold">Website Copy Generator</h3>
+              </div>
+              {!draft && (
+                <button
+                  onClick={generateCopy}
+                  disabled={draftLoading || !trend.id || trend.id === trend.term.replace(/\s+/g, '-').toLowerCase()}
+                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {draftLoading ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+                  {draftLoading ? 'Generating...' : 'Generate Copy'}
+                </button>
+              )}
+            </div>
+
+            {!draft && !draftLoading && !draftError && (
+              <p className="text-sm text-slate-400">
+                Generate product page copy, SEO metadata, and pricing suggestions based on this trend's signals. 
+                Copy can be pasted into your Sanity CMS or any website.
+                {(!trend.id || trend.id === trend.term.replace(/\s+/g, '-').toLowerCase()) && (
+                  <span className="block mt-2 text-yellow-400/70 text-xs">This term must be tracked (approved from Discovery Queue) to generate copy.</span>
+                )}
+              </p>
+            )}
+
+            {draftError && (
+              <p className="text-sm text-red-400">{draftError}</p>
+            )}
+
+            {draft && (
+              <div className="space-y-4">
+                {/* Title + Subtitle */}
+                <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className="text-xs text-emerald-400 uppercase font-bold">Page Title</h4>
+                    <button onClick={() => copyToClipboard(draft.title, 'title')} className="text-slate-500 hover:text-white transition-colors">
+                      {copied === 'title' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <p className="text-lg font-bold text-white">{draft.title}</p>
+                  <p className="text-sm text-slate-300 italic mt-1">{draft.subtitle}</p>
+                </div>
+
+                {/* Description */}
+                <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className="text-xs text-emerald-400 uppercase font-bold">Product Description</h4>
+                    <button onClick={() => copyToClipboard(draft.description, 'desc')} className="text-slate-500 hover:text-white transition-colors">
+                      {copied === 'desc' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <div className="text-sm text-slate-200 leading-relaxed whitespace-pre-line">{draft.description}</div>
+                </div>
+
+                {/* SEO + Price */}
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
+                    <h4 className="text-xs text-blue-400 uppercase font-bold mb-2">SEO Metadata</h4>
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <span className="text-slate-500">Title: </span>
+                        <span className="text-slate-200">{draft.seoTitle}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Description: </span>
+                        <span className="text-slate-200">{draft.seoDescription}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Keywords: </span>
+                        <span className="text-slate-200">{draft.seoKeywords.join(', ')}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
+                    <h4 className="text-xs text-orange-400 uppercase font-bold mb-2">Suggested Price</h4>
+                    <div className="text-3xl font-bold text-white">${draft.suggestedPrice}</div>
+                    <p className="text-xs text-slate-500 mt-1">Based on Local Effort pricing and market signals</p>
+                  </div>
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={copyAllAsMarkdown}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+                  >
+                    {copied === 'all' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                    {copied === 'all' ? 'Copied!' : 'Copy All as Markdown'}
+                  </button>
+                  <button
+                    onClick={generateCopy}
+                    disabled={draftLoading}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors"
+                  >
+                    <FileText size={14} />
+                    Regenerate
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
         </div>
