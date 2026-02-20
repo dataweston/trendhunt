@@ -52,6 +52,14 @@ const supabase = (SUPABASE_URL && SUPABASE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
   : null;
 
+const DEMO_TERMS = new Set([
+  'Birria Tacos',
+  'Mochi Donuts',
+  'Korean Corn Dogs',
+  'Detroit-style Pizza',
+  'Ube Lattes',
+]);
+
 // --- Scoring ---
 const WEIGHTS: Record<string, number> = {
   OwnSales: 3.0, TikTok: 2.0, OwnTraffic: 1.8, Reddit: 1.5,
@@ -225,11 +233,44 @@ async function fetchSquareSales(term: string): Promise<SignalData> {
 }
 
 // --- GA4 Data API via service account ---
-async function getGA4AccessToken(): Promise<string | null> {
-  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-  if (!b64) return null;
+function parseServiceAccount(): any | null {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!raw) return null;
+
+  const tryParse = (value: string) => {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryParse(raw);
+  if (direct) return direct;
+
+  let decoded = '';
   try {
-    const sa = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
+    decoded = Buffer.from(raw, 'base64').toString('utf-8');
+  } catch {
+    return null;
+  }
+
+  const parsed = tryParse(decoded);
+  if (parsed) return parsed;
+
+  const repaired = decoded.replace(
+    /("private_key"\s*:\s*")([\s\S]*?)(")/m,
+    (_m, start, key, end) => `${start}${String(key).replace(/\r?\n/g, '\\n')}${end}`
+  );
+  return tryParse(repaired);
+}
+
+async function getGA4AccessToken(): Promise<string | null> {
+  const sa = parseServiceAccount();
+  if (!sa) return null;
+  try {
+    const privateKey = String(sa.private_key || '').replace(/\\n/g, '\n');
+    if (!privateKey || !sa.client_email) return null;
     // Build JWT
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
     const now = Math.floor(Date.now() / 1000);
@@ -241,7 +282,7 @@ async function getGA4AccessToken(): Promise<string | null> {
       exp: now + 3600,
     })).toString('base64url');
     const crypto = await import('crypto');
-    const signature = crypto.sign('RSA-SHA256', Buffer.from(`${header}.${payload}`), sa.private_key)
+    const signature = crypto.sign('RSA-SHA256', Buffer.from(`${header}.${payload}`), privateKey)
       .toString('base64url');
     const jwt = `${header}.${payload}.${signature}`;
     const { data } = await axios.post('https://oauth2.googleapis.com/token', {
@@ -325,26 +366,15 @@ async function getHistory(trendId: string, limit = 12) {
   }
 }
 
-const DEFAULT_TERMS = [
-  { term: 'Birria Tacos', category: 'Mexican', neighborhood: 'Northeast', region: 'Minneapolis–St Paul' },
-  { term: 'Mochi Donuts', category: 'Bakery', neighborhood: 'North Loop', region: 'Minneapolis–St Paul' },
-  { term: 'Korean Corn Dogs', category: 'Street Food', neighborhood: 'Dinkytown', region: 'Minneapolis–St Paul' },
-  { term: 'Detroit-style Pizza', category: 'Pizza', neighborhood: 'Uptown', region: 'Minneapolis–St Paul' },
-  { term: 'Ube Lattes', category: 'Cafe', neighborhood: 'Powderhorn', region: 'Minneapolis–St Paul' },
-];
-
 async function getTrackedTerms() {
-  if (!supabase) return DEFAULT_TERMS.map(d => ({ ...d, id: '' }));
+  if (!supabase) return [];
   try {
     const { data } = await supabase.from('trends').select('id, term, category, neighborhood').order('created_at');
-    if (!data?.length) {
-      const { data: seeded } = await supabase.from('trends').upsert(DEFAULT_TERMS, { onConflict: 'term' }).select();
-      return (seeded || DEFAULT_TERMS).map(d => ({ id: d.id || '', term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
-    }
-    return data.map(d => ({ id: d.id, term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
+    const filtered = (data || []).filter(d => !DEMO_TERMS.has((d.term || '').trim()));
+    return filtered.map(d => ({ id: d.id, term: d.term, category: d.category || '', neighborhood: d.neighborhood || '' }));
   } catch (error) {
     console.error('Supabase getTrackedTerms error:', error);
-    return DEFAULT_TERMS.map(d => ({ ...d, id: '' }));
+    return [];
   }
 }
 
@@ -357,7 +387,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    const terms = await getTrackedTerms();
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const isSearchMode = query.length > 0;
+    const terms = isSearchMode
+      ? [{ id: '', term: query, category: 'Search', neighborhood: 'All Neighborhoods' }]
+      : await getTrackedTerms();
+
+    if (!terms.length) {
+      return res.status(200).json([]);
+    }
 
     const trends: TrendEntity[] = await Promise.all(terms.map(async (item) => {
       const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic] = await Promise.all([
@@ -380,7 +418,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Persist
       let trendId = item.id || '';
-      if (supabase) {
+      if (supabase && !isSearchMode) {
         try {
           const { data: row } = await supabase
             .from('trends')
@@ -398,7 +436,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Build history from past snapshots
       let predicted = 0;
-      if (trendId) {
+      if (trendId && !isSearchMode) {
         const past = await getHistory(trendId, 12);
         if (past.length > 0) {
           predicted = predictBreakout(past.map((r, i) => ({ week: i + 1, score: r.unmet_demand_score ?? 0 })), ud);
@@ -426,3 +464,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(500).json({ error: 'Failed to fetch trends' });
   }
 }
+

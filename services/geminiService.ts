@@ -1,11 +1,20 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { TrendEntity, AnalysisResult } from '../types';
 
-// Initialize Gemini Client
-// Note: We are using process.env.API_KEY as mandated.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+const FALLBACK_ANALYSIS: AnalysisResult = {
+  summary: "AI Analysis unavailable. Signal propagation indicates a strong correlation between social discovery and search intent.",
+  recommendation: "Monitor local supply competitors closely.",
+  riskAssessment: "Moderate volatility detected."
+};
+
+const apiKey = (process.env.API_KEY || process.env.GEMINI_API_KEY || '').trim();
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 export const analyzeTrendWithGemini = async (trend: TrendEntity): Promise<AnalysisResult> => {
+  if (!ai) {
+    return FALLBACK_ANALYSIS;
+  }
+
   try {
     // Construct a detailed prompt context based on the trend data
     const signalSummary = trend.signals.map(s => 
@@ -56,10 +65,6 @@ export const analyzeTrendWithGemini = async (trend: TrendEntity): Promise<Analys
     throw new Error("No text in response");
   } catch (error) {
     console.error("Gemini Analysis Failed:", error);
-    return {
-      summary: "AI Analysis unavailable. Signal propagation indicates a strong correlation between social discovery and search intent.",
-      recommendation: "Monitor local supply competitors closely.",
-      riskAssessment: "Moderate volatility detected."
-    };
+    return FALLBACK_ANALYSIS;
   }
 };

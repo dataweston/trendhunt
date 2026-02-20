@@ -15,10 +15,10 @@ const App = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue'>('dashboard');
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (query = '') => {
     setLoading(true);
     try {
-      const data = await trendService.getTrends();
+      const data = await trendService.getTrends(query);
       setTrends(data);
       setError(null);
     } catch (error) {
@@ -29,12 +29,10 @@ const App = () => {
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
-
-  const filteredTrends = trends.filter(t => 
-    t.term.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    t.category.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    const timer = setTimeout(() => loadData(searchTerm), 300);
+    return () => clearTimeout(timer);
+  }, [loadData, searchTerm]);
 
   const activeAlerts = trends.filter(t => t.breakoutProbability > 75).length;
 
@@ -171,7 +169,7 @@ const App = () => {
               {/* Main Chart Area */}
               <div className="lg:col-span-2 space-y-6">
                   <div className="bg-slate-800/20 rounded-xl">
-                     <OpportunityTable trends={filteredTrends} onSelectTrend={setSelectedTrend} />
+                     <OpportunityTable trends={trends} onSelectTrend={setSelectedTrend} />
                   </div>
                   
                   {/* Featured Analysis */}

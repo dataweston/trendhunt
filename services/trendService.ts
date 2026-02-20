@@ -3,8 +3,10 @@ import { TrendEntity } from '../types';
 const API_URL = '/api/trends';
 
 export const trendService = {
-  getTrends: async (): Promise<TrendEntity[]> => {
-    const response = await fetch(API_URL);
+  getTrends: async (query = ''): Promise<TrendEntity[]> => {
+    const q = query.trim();
+    const url = q ? `${API_URL}?q=${encodeURIComponent(q)}` : API_URL;
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`API ${response.status}: ${response.statusText}`);
     }
