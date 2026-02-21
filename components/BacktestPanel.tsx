@@ -56,6 +56,7 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
   const [expandedTerm, setExpandedTerm] = useState<string | null>(null);
   const [adminTokenInput, setAdminTokenInput] = useState(() => getStoredAdminToken());
   const [authNotice, setAuthNotice] = useState('');
+  const [debugInfo, setDebugInfo] = useState<any>(null);
 
   const saveAdminToken = () => {
     setStoredAdminToken(adminTokenInput);
@@ -151,6 +152,32 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
         {error && (
           <div className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded px-3 py-2">
             {error}
+          </div>
+        )}
+
+        {/* Debug button */}
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={async () => {
+              setDebugInfo(null);
+              try {
+                const resp = await fetch('/api/ga4-backtest?mode=debug', { headers: getAdminHeaders() });
+                const data = await resp.json();
+                setDebugInfo(data);
+              } catch (e: any) {
+                setDebugInfo({ error: e.message });
+              }
+            }}
+            className="text-[10px] text-slate-500 hover:text-slate-300 underline transition-colors"
+          >
+            Test GA4 connection
+          </button>
+        </div>
+
+        {/* Debug output */}
+        {debugInfo && (
+          <div className="mt-2 bg-slate-900 border border-slate-700 rounded p-3 text-xs font-mono text-slate-300 max-h-64 overflow-auto whitespace-pre-wrap">
+            {JSON.stringify(debugInfo, null, 2)}
           </div>
         )}
       </div>

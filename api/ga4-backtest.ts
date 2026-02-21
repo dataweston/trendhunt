@@ -906,6 +906,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const mode = (typeof req.query.mode === 'string' ? req.query.mode : 'discover').toLowerCase();
 
   try {
+    // Debug mode: dump raw GA4 data without any filtering to diagnose connectivity
+    if (mode === 'debug') {
+      const startDate = monthsAgoDate(LOOKBACK_MONTHS);
+      let authOk = false;
+      let authError = '';
+      let rawPaths: any[] = [];
+      let rawTitles: any[] = [];
+      let rawPathsError = '';
+      let rawTitlesError = '';
+
+      // Test auth
+      try {
+        const token = await getGA4AccessToken();
+        authOk = !!token;
+        if (!token) authError = 'getGA4AccessToken returned null — check GOOGLE_SERVICE_ACCOUNT_KEY';
+      } catch (e: any) {
+        authError = String(e.message || e);
+      }
+
+      // Fetch top 20 pages (no filters)
+      if (authOk) {
+        try {
+          const rows = await runGA4Report({
+            dateRanges: [{ startDate, endDate: 'today' }],
+            dimensions: [{ name: 'pagePath' }],
+            metrics: [{ name: 'screenPageViews' }],
+            orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+            limit: 20,
+          });
+          rawPaths = rows.map(r => ({ path: r.dimensionValues[0].value, views: r.metricValues[0].value }));
+        } catch (e: any) { rawPathsError = String(e.message || e); }
+
+        // Fetch top 20 page titles (no filters)
+        try {
+          const rows = await runGA4Report({
+            dateRanges: [{ startDate, endDate: 'today' }],
+            dimensions: [{ name: 'pageTitle' }],
+            metrics: [{ name: 'screenPageViews' }],
+            orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+            limit: 20,
+          });
+          rawTitles = rows.map(r => ({ title: r.dimensionValues[0].value, views: r.metricValues[0].value }));
+        } catch (e: any) { rawTitlesError = String(e.message || e); }
+      }
+
+      return res.status(200).json({
+        mode: 'debug',
+        ga4PropertyId: GA4_PROPERTY_ID,
+        serviceAccountPresent: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+        authOk,
+        authError: authError || null,
+        lookbackMonths: LOOKBACK_MONTHS,
+        startDate,
+        rawPaths: rawPaths.length > 0 ? rawPaths : rawPathsError || 'no rows returned',
+        rawTitles: rawTitles.length > 0 ? rawTitles : rawTitlesError || 'no rows returned',
+        hint: rawPaths.length === 0 && authOk
+          ? 'GA4 auth works but no data was returned. Verify the GA4_PROPERTY_ID matches the correct property, and that the service account has Viewer access to it.'
+          : undefined,
+      });
+    }
+
     if (mode === 'timeseries') {
       // Single-term deep dive
       const term = typeof req.query.term === 'string' ? req.query.term.trim() : '';
