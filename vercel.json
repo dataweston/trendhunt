@@ -13,8 +13,7 @@
     "api/cron-score.ts":     { "maxDuration": 60 },
     "api/ga4-funnel.ts":     { "maxDuration": 30 },
     "api/evaluate-launches.ts": { "maxDuration": 15 },
-    "api/analyze-trend.ts":  { "maxDuration": 15 },
-    "api/calibrate.ts":      { "maxDuration": 15 }
+    "api/analyze-trend.ts":  { "maxDuration": 15 }
   },
   "crons": [
     {
