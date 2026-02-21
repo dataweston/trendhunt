@@ -24,6 +24,30 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+type BacktestTermType = 'food_concept' | 'offer_type' | 'nav_noise';
+
+interface GA4Prior {
+  term: string;
+  key: string;
+  compositeScore: number;
+  growthRate: number;
+  termType: BacktestTermType;
+}
+
+const GA4_BOOSTABLE_TERM_TYPES = new Set<BacktestTermType>(['food_concept', 'offer_type']);
+const MATCH_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'by', 'with',
+  'minneapolis', 'saint', 'st', 'paul', 'mn', 'local', 'effort',
+]);
+const NAV_NOISE_TOKENS = [
+  '(not set)', 'about', 'contact', 'privacy', 'terms', 'account', 'login', 'calendar', 'portal',
+  'partner', 'partners', 'wedding', 'weddings', 'release', 'releases', 'crowdfunding', 'gallery',
+  'master calendar', 'our purveyors', 'services',
+];
+const OFFER_HINTS = [
+  'personal chef', 'private chef', 'event catering', 'meal prep', 'meal plan',
+  'weekly meal prep', 'dinner', 'dinners', 'pizza party',
+];
 
 // --- Generic terms that are NOT trends — permanent food categories ---
 const GENERIC_BLOCKLIST = new Set([
@@ -57,11 +81,47 @@ function isGenericTerm(term: string): boolean {
 }
 
 function normalizeTermKey(term: string): string {
-  return term
+  const tokens = term
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .split(' ')
+    .filter((token) => token && !MATCH_STOPWORDS.has(token));
+  return tokens.join(' ');
+}
+
+function tokenizeKey(term: string): string[] {
+  const key = normalizeTermKey(term);
+  if (!key) return [];
+  return key.split(' ').filter(Boolean);
+}
+
+function isLikelyNavNoise(term: string): boolean {
+  const normalized = term.toLowerCase().trim();
+  if (!normalized || normalized === '(not set)') return true;
+  return NAV_NOISE_TOKENS.some((token) => normalized.includes(token));
+}
+
+function inferBacktestTermType(term: string): BacktestTermType {
+  const normalized = term.toLowerCase().trim();
+  if (isLikelyNavNoise(normalized)) return 'nav_noise';
+  if (OFFER_HINTS.some((hint) => normalized.includes(hint))) return 'offer_type';
+  return isGenericTerm(normalized) ? 'nav_noise' : 'food_concept';
+}
+
+function similarityScore(a: string, b: string): number {
+  const ak = normalizeTermKey(a);
+  const bk = normalizeTermKey(b);
+  if (!ak || !bk) return 0;
+  if (ak === bk) return 1;
+  if (ak.includes(bk) || bk.includes(ak)) return 0.9;
+  const aTokens = new Set(tokenizeKey(ak));
+  const bTokens = new Set(tokenizeKey(bk));
+  if (!aTokens.size || !bTokens.size) return 0;
+  const intersect = [...aTokens].filter((token) => bTokens.has(token)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  return union > 0 ? intersect / union : 0;
 }
 
 async function queueTerm(term: string, source: string, score: number) {
@@ -70,6 +130,7 @@ async function queueTerm(term: string, source: string, score: number) {
   if (normalized.length < 3) return;
   // Block generic food categories — these are not trends
   if (isGenericTerm(normalized)) return;
+  if (isLikelyNavNoise(normalized)) return;
   // Skip if already tracked
   const { data: existing } = await supabase.from('trends').select('id').ilike('term', normalized).maybeSingle();
   if (existing) return;
@@ -79,33 +140,74 @@ async function queueTerm(term: string, source: string, score: number) {
   await supabase.from('discovery_queue').insert({ term: normalized, source, initial_score: Math.round(score), status: 'pending' });
 }
 
-async function loadGA4BacktestPriors(): Promise<Map<string, { compositeScore: number; growthRate: number }>> {
-  const prior = new Map<string, { compositeScore: number; growthRate: number }>();
-  if (!supabase) return prior;
+async function loadGA4BacktestPriors(): Promise<{ byKey: Map<string, GA4Prior>; all: GA4Prior[] }> {
+  const byKey = new Map<string, GA4Prior>();
+  const all: GA4Prior[] = [];
+  if (!supabase) return { byKey, all };
 
   try {
-    const { data, error } = await supabase
+    const primary = await supabase
       .from('ga4_backtest_results')
-      .select('term, composite_score, growth_rate')
+      .select('term, composite_score, growth_rate, term_type')
       .order('composite_score', { ascending: false })
-      .limit(500);
+      .limit(600);
 
-    if (error || !data) return prior;
-    for (const row of data as any[]) {
-      const key = normalizeTermKey(String(row.term || ''));
-      if (!key) continue;
-      const compositeScore = Number(row.composite_score || 0);
-      const growthRate = Number(row.growth_rate || 0);
-      const existing = prior.get(key);
-      if (!existing || compositeScore > existing.compositeScore) {
-        prior.set(key, { compositeScore, growthRate });
+    let rows: any[] = [];
+    if (!primary.error && primary.data) {
+      rows = primary.data as any[];
+    } else {
+      const fallback = await supabase
+        .from('ga4_backtest_results')
+        .select('term, composite_score, growth_rate')
+        .order('composite_score', { ascending: false })
+        .limit(600);
+      if (fallback.error || !fallback.data) return { byKey, all };
+      rows = fallback.data as any[];
+    }
+
+    for (const row of rows) {
+      const term = String(row.term || '').trim();
+      const key = normalizeTermKey(term);
+      if (!key || isLikelyNavNoise(term)) continue;
+      const termType = String(row.term_type || inferBacktestTermType(term)) as BacktestTermType;
+      if (!GA4_BOOSTABLE_TERM_TYPES.has(termType)) continue;
+
+      const prior: GA4Prior = {
+        term,
+        key,
+        compositeScore: Number(row.composite_score || 0),
+        growthRate: Number(row.growth_rate || 0),
+        termType,
+      };
+      const existing = byKey.get(key);
+      if (!existing || prior.compositeScore > existing.compositeScore) {
+        byKey.set(key, prior);
       }
     }
   } catch (error) {
     console.error('GA4 prior load failed:', error);
   }
 
-  return prior;
+  for (const prior of byKey.values()) all.push(prior);
+  return { byKey, all };
+}
+
+function findGA4Prior(term: string, priors: { byKey: Map<string, GA4Prior>; all: GA4Prior[] }): GA4Prior | null {
+  const key = normalizeTermKey(term);
+  if (!key) return null;
+  const direct = priors.byKey.get(key);
+  if (direct) return direct;
+
+  let best: GA4Prior | null = null;
+  let bestScore = 0;
+  for (const candidate of priors.all) {
+    const score = similarityScore(key, candidate.key);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return bestScore >= 0.62 ? best : null;
 }
 
 // --- Yelp via SerpAPI: popular + trending businesses in location ---
@@ -364,7 +466,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const trackTerm = (term: string, source: string, score: number) => {
       if (isGenericTerm(term)) return;
+      if (isLikelyNavNoise(term)) return;
       const key = normalizeTermKey(term);
+      if (!key) return;
       const existing = termSources.get(key) || { sources: new Set(), bestScore: 0, hasSerpapi: false };
       existing.sources.add(source);
       existing.bestScore = Math.max(existing.bestScore, score);
@@ -390,19 +494,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const sourceCount = info.sources.size;
       const multiSourceBonus = sourceCount >= 3 ? 40 : sourceCount >= 2 ? 20 : 0;
       const serpapiBonus = info.hasSerpapi ? 12 : 0;
-      const ga4Prior = ga4Priors.get(term);
+      const ga4Prior = findGA4Prior(term, ga4Priors);
       const ga4Bonus = ga4Prior
         ? Math.min(
-            25,
-            Math.round(ga4Prior.compositeScore * 0.15) + Math.max(0, Math.min(10, Math.round(ga4Prior.growthRate / 25)))
+            15,
+            Math.round(ga4Prior.compositeScore * 0.08) + Math.max(0, Math.min(5, Math.round(ga4Prior.growthRate / 40)))
           )
         : 0;
       if (ga4Bonus > 0) ga4Boosted++;
 
       const finalScore = Math.min(100, info.bestScore + multiSourceBonus + serpapiBonus + ga4Bonus);
-      const sourceLabel = [...info.sources, ...(ga4Bonus > 0 ? ['ga4-prior'] : [])].join('+');
-      const hasPrimaryEvidence = info.hasSerpapi || ga4Bonus >= 18;
-      const clearsEvidenceBar = sourceCount >= 2 || info.bestScore >= 60 || ga4Bonus >= 18;
+      const sourceLabel = [...info.sources, ...(ga4Bonus > 0 ? [`ga4-prior:${ga4Prior?.termType}`] : [])].join('+');
+      const hasPrimaryEvidence = info.hasSerpapi;
+      const clearsEvidenceBar = sourceCount >= 2 || info.bestScore >= 60 || (info.hasSerpapi && ga4Bonus >= 8);
 
       if (hasPrimaryEvidence && clearsEvidenceBar) {
         // Use original casing from extracted terms if available
@@ -430,7 +534,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         rising: risingQueries.length,
         reddit_titles: redditTitles.length,
         nlp_extracted: extractedTerms.length,
-        ga4_prior_terms: ga4Priors.size,
+        ga4_prior_terms: ga4Priors.byKey.size,
         ga4_boosted_candidates: ga4Boosted,
       },
       debug: {

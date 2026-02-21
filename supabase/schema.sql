@@ -32,6 +32,10 @@ create table if not exists trend_history (
   raw_signals jsonb -- Store the raw signal data (Reddit count, etc.) for debugging
 );
 alter table if exists trend_history add column if not exists zip_code text;
+alter table if exists trend_history add column if not exists demand_score numeric;
+alter table if exists trend_history add column if not exists supply_score numeric;
+alter table if exists trend_history add column if not exists unmet_demand_score numeric;
+alter table if exists trend_history add column if not exists breakout_probability numeric;
 alter table if exists trend_history add column if not exists intent_score numeric;
 alter table if exists trend_history add column if not exists availability_score numeric;
 alter table if exists trend_history add column if not exists realization_score numeric;
@@ -39,6 +43,7 @@ alter table if exists trend_history add column if not exists gap_score numeric;
 alter table if exists trend_history add column if not exists confidence_score numeric;
 alter table if exists trend_history add column if not exists serpapi_share numeric;
 alter table if exists trend_history add column if not exists evidence jsonb;
+alter table if exists trend_history add column if not exists raw_signals jsonb;
 
 -- Page Drafts: AI-generated product page content
 create table if not exists page_drafts (
@@ -92,6 +97,7 @@ create table if not exists discovery_queue (
 create table if not exists ga4_backtest_results (
   id uuid default uuid_generate_v4() primary key,
   term text not null,
+  term_type text default 'nav_noise', -- food_concept | offer_type | nav_noise
   source text, -- 'path', 'title', 'search', 'organic', or combined
   raw_key text, -- original page path, title, or search term
   composite_score numeric,
@@ -107,5 +113,7 @@ create table if not exists ga4_backtest_results (
   status text default 'pending', -- pending, queued, dismissed
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+alter table if exists ga4_backtest_results add column if not exists term_type text default 'nav_noise';
 create index if not exists idx_ga4_backtest_score on ga4_backtest_results(composite_score desc);
 create index if not exists idx_ga4_backtest_term on ga4_backtest_results(term);
+create index if not exists idx_ga4_backtest_type on ga4_backtest_results(term_type);

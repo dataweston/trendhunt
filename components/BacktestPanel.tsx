@@ -4,6 +4,7 @@ import { getAdminHeaders, getStoredAdminToken, setStoredAdminToken } from '../se
 
 interface BacktestCandidate {
   term: string;
+  termType?: 'food_concept' | 'offer_type' | 'nav_noise';
   source: string;
   compositeScore: number;
   totalViews: number;
@@ -19,7 +20,15 @@ interface BacktestCandidate {
 
 interface BacktestResult {
   ok: boolean;
-  stats: { paths: number; titles: number; searches: number; organicLandings: number };
+  stats: {
+    paths: number;
+    titles: number;
+    searches: number;
+    organicLandings: number;
+    siteSearchEventRows?: number;
+    siteSearchAcceptedRows?: number;
+    siteSearchConfigured?: number;
+  };
   candidateCount: number;
   queuedTerms: string[];
   candidates: BacktestCandidate[];
@@ -257,6 +266,7 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
                     <div className="text-sm font-medium text-white truncate">{c.term}</div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
                       via {c.source} &middot; {c.monthCount} months of data
+                      {c.termType ? ` • ${c.termType.replace('_', ' ')}` : ''}
                     </div>
                   </div>
 

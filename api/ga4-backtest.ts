@@ -36,6 +36,101 @@ const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 // --- How far back to look (months) ---
 const LOOKBACK_MONTHS = 36;
+const GA4_SITE_SEARCH_EVENTS = ['view_search_results', 'search'] as const;
+
+type BacktestTermType = 'food_concept' | 'offer_type' | 'nav_noise';
+
+const FOOD_SIGNAL_TOKENS = [
+  'pizza', 'sandwich', 'sandwiches', 'taco', 'tacos', 'ramen', 'sushi', 'salad', 'meal', 'meals',
+  'prep', 'chef', 'chefs', 'catering', 'dinner', 'brunch', 'lunch', 'menu', 'charcuterie',
+  'sourdough', 'hazelnut', 'smoked', 'chocolate', 'dessert', 'cookie', 'cake', 'pastry', 'food',
+  'private chef', 'personal chef', 'weekly meal prep', 'meal plan', 'pizza party', 'event catering',
+];
+
+const OFFER_SIGNAL_TOKENS = [
+  'personal chef', 'private chef', 'event catering', 'meal prep', 'meal plan', 'weekly meal prep',
+  'dinners', 'dinner', 'pizza party', 'book a dinner', 'book your pizza party',
+];
+
+const NAV_NOISE_TOKENS = [
+  '(not set)', 'about', 'contact', 'privacy', 'terms', 'account', 'login', 'calendar', 'portal',
+  'partner', 'partners', 'wedding', 'weddings', 'release', 'releases', 'crowdfunding', 'gallery',
+  'master calendar', 'our purveyors', 'services', 'book now', 'bookings',
+];
+
+const EXCLUDED_PATH_PATTERNS = [
+  /^\/?$/,
+  /^\/partners?(\/|$)/i,
+  /^\/weddings?(\/|$)/i,
+  /^\/about(\/|$)/i,
+  /^\/contact(\/|$)/i,
+  /^\/account(\/|$)/i,
+  /^\/login(\/|$)/i,
+  /^\/calendar(\/|$)/i,
+  /^\/portal(\/|$)/i,
+  /^\/releases?(\/|$)/i,
+  /^\/privacy(\/|$)/i,
+  /^\/terms(\/|$)/i,
+  /^\/gallery(\/|$)/i,
+];
+
+const ALLOWED_PATH_PATTERNS = [
+  /\/menu(\/|$)/i,
+  /\/food(\/|$)/i,
+  /\/chef(\/|$)/i,
+  /\/meal(\/|$)/i,
+  /\/prep(\/|$)/i,
+  /\/catering(\/|$)/i,
+  /\/dinner(s)?(\/|$)/i,
+  /\/brunch(\/|$)/i,
+  /\/lunch(\/|$)/i,
+  /\/pizza(\/|$)/i,
+  /\/sandwich(es)?(\/|$)/i,
+  /\/private-chef(\/|$)/i,
+  /\/personal-chef(\/|$)/i,
+  /\/weekly-meal-prep(\/|$)/i,
+];
+
+const EXCLUDED_TITLE_PATTERNS = [
+  /\(not set\)/i,
+  /\babout\b/i,
+  /\bcontact\b/i,
+  /\bprivacy\b/i,
+  /\bterms\b/i,
+  /\blogin\b/i,
+  /\baccount\b/i,
+  /\bcalendar\b/i,
+  /\bportal\b/i,
+  /\bpartner\b/i,
+  /\bwedding(s)?\b/i,
+  /\brelease(s)?\b/i,
+  /\bcrowdfunding\b/i,
+  /\bgallery\b/i,
+];
+
+const ALLOWED_TITLE_PATTERNS = [
+  /\bmenu\b/i,
+  /\bfood\b/i,
+  /\bchef\b/i,
+  /\bmeal\b/i,
+  /\bprep\b/i,
+  /\bcatering\b/i,
+  /\bdinner(s)?\b/i,
+  /\bbrunch\b/i,
+  /\blunch\b/i,
+  /\bpizza\b/i,
+  /\bsandwich(es)?\b/i,
+  /\bcharcuterie\b/i,
+  /\bsourdough\b/i,
+  /\bhazelnut\b/i,
+  /\bsmoked\b/i,
+  /\bchocolate\b/i,
+];
+
+const MATCH_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'by', 'with',
+  'minneapolis', 'saint', 'st', 'paul', 'mn', 'local', 'effort',
+]);
 
 // --- GA4 Auth (reused from trends.ts pattern) ---
 function parseServiceAccount(): any | null {
@@ -149,7 +244,7 @@ async function minePagePaths(): Promise<Map<string, MonthlyBucket[]>> {
     const sessions = parseInt(row.metricValues[1].value, 10);
 
     // Skip homepage, admin, cart, checkout, etc.
-    if (isBoringPath(path)) continue;
+    if (isBoringPath(path) || !isAllowedPath(path)) continue;
 
     if (!pathMap.has(path)) pathMap.set(path, []);
     pathMap.get(path)!.push({ yearMonth, views, sessions });
@@ -176,7 +271,7 @@ async function minePageTitles(): Promise<Map<string, MonthlyBucket[]>> {
     const views = parseInt(row.metricValues[0].value, 10);
     const sessions = parseInt(row.metricValues[1].value, 10);
 
-    if (isBoringTitle(title)) continue;
+    if (isBoringTitle(title) || !isAllowedTitle(title)) continue;
 
     if (!titleMap.has(title)) titleMap.set(title, []);
     titleMap.get(title)!.push({ yearMonth, views, sessions });
@@ -186,39 +281,69 @@ async function minePageTitles(): Promise<Map<string, MonthlyBucket[]>> {
 
 // ========== STRATEGY 3: Mine Site Search ==========
 
-async function mineSiteSearch(): Promise<Map<string, MonthlyBucket[]>> {
+interface SiteSearchStats {
+  eventRows: number;
+  acceptedRows: number;
+  configured: boolean;
+  eventsFound: string[];
+}
+
+interface SiteSearchResult {
+  data: Map<string, MonthlyBucket[]>;
+  stats: SiteSearchStats;
+}
+
+async function mineSiteSearch(): Promise<SiteSearchResult> {
   const startDate = monthsAgoDate(LOOKBACK_MONTHS);
+  const searchMap = new Map<string, MonthlyBucket[]>();
+  const stats: SiteSearchStats = {
+    eventRows: 0,
+    acceptedRows: 0,
+    configured: false,
+    eventsFound: [],
+  };
+
   try {
-    const rows = await runGA4Report({
-      dateRanges: [{ startDate, endDate: 'today' }],
-      dimensions: [{ name: 'searchTerm' }, { name: 'yearMonth' }],
-      metrics: [{ name: 'eventCount' }],
-      dimensionFilter: {
-        filter: {
-          fieldName: 'eventName',
-          stringFilter: { matchType: 'EXACT', value: 'view_search_results' },
+    for (const eventName of GA4_SITE_SEARCH_EVENTS) {
+      const rows = await runGA4Report({
+        dateRanges: [{ startDate, endDate: 'today' }],
+        dimensions: [{ name: 'searchTerm' }, { name: 'yearMonth' }],
+        metrics: [{ name: 'eventCount' }],
+        dimensionFilter: {
+          filter: {
+            fieldName: 'eventName',
+            stringFilter: { matchType: 'EXACT', value: eventName },
+          },
         },
-      },
-      orderBys: [{ dimension: { dimensionName: 'yearMonth' }, desc: false }],
-      limit: 10000,
-    });
+        orderBys: [{ dimension: { dimensionName: 'yearMonth' }, desc: false }],
+        limit: 10000,
+      });
 
-    const searchMap = new Map<string, MonthlyBucket[]>();
-    for (const row of rows) {
-      const term = row.dimensionValues[0].value;
-      const yearMonth = row.dimensionValues[1].value;
-      const count = parseInt(row.metricValues[0].value, 10);
+      stats.eventRows += rows.length;
+      if (rows.length > 0) {
+        stats.configured = true;
+        stats.eventsFound.push(eventName);
+      }
 
-      if (!term || term === '(not set)' || term.length < 2) continue;
+      for (const row of rows) {
+        const term = row.dimensionValues[0].value;
+        const yearMonth = row.dimensionValues[1].value;
+        const count = parseInt(row.metricValues[0].value, 10);
 
-      if (!searchMap.has(term)) searchMap.set(term, []);
-      searchMap.get(term)!.push({ yearMonth, views: count, sessions: count });
+        if (!term || term === '(not set)' || term.length < 2) continue;
+        if (isLikelyNavNoiseTerm(term)) continue;
+
+        if (!searchMap.has(term)) searchMap.set(term, []);
+        searchMap.get(term)!.push({ yearMonth, views: count, sessions: count });
+        stats.acceptedRows += 1;
+      }
     }
-    return searchMap;
+
+    return { data: searchMap, stats };
   } catch (e) {
-    // Site search may not be configured — that's fine
+    // Site search may not be configured - that's fine
     console.warn('Site search mining failed (may not be configured):', e);
-    return new Map();
+    return { data: searchMap, stats };
   }
 }
 
@@ -249,7 +374,7 @@ async function mineOrganicLandings(): Promise<Map<string, MonthlyBucket[]>> {
 
     // Strip query strings for grouping
     path = path.split('?')[0];
-    if (isBoringPath(path)) continue;
+    if (isBoringPath(path) || !isAllowedPath(path)) continue;
 
     if (!landingMap.has(path)) landingMap.set(path, []);
     landingMap.get(path)!.push({ yearMonth, views: users, sessions });
@@ -295,6 +420,7 @@ interface MonthlyBucket {
 
 interface TrendAnalysis {
   term: string;
+  termType: BacktestTermType;
   source: string; // 'path' | 'title' | 'search' | 'organic'
   rawKey: string; // original path/title/search term
   totalViews: number;
@@ -329,7 +455,7 @@ function analyzeTrend(term: string, source: string, rawKey: string, buckets: Mon
   const olderMonths = views.slice(Math.max(0, n - 18), Math.max(0, n - 6));
   const recentAvg = recentMonths.length > 0 ? recentMonths.reduce((a, b) => a + b, 0) / recentMonths.length : 0;
   const olderAvg = olderMonths.length > 0 ? olderMonths.reduce((a, b) => a + b, 0) / olderMonths.length : 0;
-  const growthRate = olderAvg > 0 ? ((recentAvg - olderAvg) / olderAvg) * 100 : (recentAvg > 0 ? 100 : 0);
+  const growthRate = calculateSmoothedGrowthRate(recentAvg, olderAvg, olderMonths.length);
 
   // Linear regression: slope = trend direction
   const { slope, r2 } = linearRegression(views);
@@ -345,16 +471,22 @@ function analyzeTrend(term: string, source: string, rawKey: string, buckets: Mon
 
   // Recency score: weight recent months heavily
   const recency = calculateRecencyScore(views);
+  const termType = classifyBacktestTerm(term, rawKey, source);
 
   // Composite score — what we ultimately rank by
   // Prioritizes: recent growth, positive slope, acceleration, volume
   const compositeScore = calculateCompositeScore({
     growthRate, slope, acceleration, recency,
     totalViews, recentAvg, monthCount: n, seasonality,
+    sourceQuality: sourceQualityAdjustment(source),
   });
 
   return {
-    term, source, rawKey, totalViews,
+    term,
+    termType,
+    source,
+    rawKey,
+    totalViews,
     monthCount: n,
     recentMonthlyAvg: Math.round(recentAvg * 10) / 10,
     olderMonthlyAvg: Math.round(olderAvg * 10) / 10,
@@ -439,8 +571,9 @@ function calculateCompositeScore(params: {
   recentAvg: number;
   monthCount: number;
   seasonality: number;
+  sourceQuality: number;
 }): number {
-  const { growthRate, slope, acceleration, recency, totalViews, recentAvg, monthCount, seasonality } = params;
+  const { growthRate, slope, acceleration, recency, totalViews, recentAvg, monthCount, seasonality, sourceQuality } = params;
 
   // Volume score: log-scaled, 100+ total views = decent, 1000+ = strong
   const volumeScore = Math.min(30, Math.log10(Math.max(1, totalViews)) * 10);
@@ -466,7 +599,26 @@ function calculateCompositeScore(params: {
   // Recent activity requirement: must have SOME recent traffic
   const recentPenalty = recentAvg < 2 ? -15 : 0;
 
-  return volumeScore + growthScore + slopeScore + accelScore + recencyBonus + steadyBonus + coveragePenalty + recentPenalty;
+  return volumeScore + growthScore + slopeScore + accelScore + recencyBonus + steadyBonus + coveragePenalty + recentPenalty + sourceQuality;
+}
+
+function calculateSmoothedGrowthRate(recentAvg: number, olderAvg: number, olderMonthCount: number): number {
+  // Add pseudocounts so cold-start terms don't auto-jump to +100%.
+  const prior = olderMonthCount >= 3 ? 1 : 4;
+  const smoothedRecent = recentAvg + prior;
+  const smoothedOlder = olderAvg + prior;
+  return ((smoothedRecent - smoothedOlder) / smoothedOlder) * 100;
+}
+
+function sourceQualityAdjustment(source: string): number {
+  const parts = new Set(source.split('+').map((s) => s.trim()).filter(Boolean));
+  let adjustment = 0;
+  if (parts.has('search')) adjustment += 10;
+  if (parts.has('organic')) adjustment += 6;
+  if (parts.has('path')) adjustment += 2;
+  if (parts.has('title')) adjustment -= 3;
+  if (parts.size >= 2) adjustment += 2;
+  return Math.max(-6, Math.min(15, adjustment));
 }
 
 // ========== UTILITIES ==========
@@ -528,7 +680,68 @@ function isBoringTitle(title: string): boolean {
   if (boring.some(b => lower === b || lower.startsWith(b + ' '))) return true;
   // Skip titles that are just the restaurant name (no food term)
   if (lower.split(/\s+/).length <= 1) return true;
+  if (lower === '(not set)') return true;
   return false;
+}
+
+function isAllowedPath(path: string): boolean {
+  const normalized = path.toLowerCase().trim();
+  if (!normalized) return false;
+  if (EXCLUDED_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) return false;
+  if (ALLOWED_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+
+  const tail = normalized.split('/').filter(Boolean).pop() || '';
+  if (!tail || tail.length < 3) return false;
+  const readableTail = tail.replace(/[-_]+/g, ' ');
+  return FOOD_SIGNAL_TOKENS.some((token) => readableTail.includes(token));
+}
+
+function isAllowedTitle(title: string): boolean {
+  const normalized = title.toLowerCase().trim();
+  if (!normalized) return false;
+  if (EXCLUDED_TITLE_PATTERNS.some((pattern) => pattern.test(normalized))) return false;
+  return ALLOWED_TITLE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function tokenizeTerm(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function containsAnyToken(text: string, tokens: string[]): boolean {
+  return tokens.some((token) => text.includes(token));
+}
+
+function isLikelyNavNoiseTerm(term: string): boolean {
+  const normalized = term.toLowerCase().trim();
+  if (!normalized || normalized === '(not set)') return true;
+  if (containsAnyToken(normalized, NAV_NOISE_TOKENS)) return true;
+  const words = tokenizeTerm(normalized);
+  if (words.length === 1 && !containsAnyToken(normalized, FOOD_SIGNAL_TOKENS) && !containsAnyToken(normalized, OFFER_SIGNAL_TOKENS)) {
+    return true;
+  }
+  return false;
+}
+
+function classifyBacktestTerm(term: string, rawKey: string, source: string): BacktestTermType {
+  const normalizedTerm = term.toLowerCase().trim();
+  const normalizedRaw = rawKey.toLowerCase().trim();
+  const combined = `${normalizedTerm} ${normalizedRaw}`;
+
+  if (!normalizedTerm || normalizedTerm === '(not set)') return 'nav_noise';
+  if (containsAnyToken(combined, NAV_NOISE_TOKENS)) return 'nav_noise';
+  if (normalizedRaw.startsWith('/partners/') || normalizedRaw.startsWith('/weddings')) return 'nav_noise';
+
+  if (containsAnyToken(combined, OFFER_SIGNAL_TOKENS)) return 'offer_type';
+  if (containsAnyToken(combined, FOOD_SIGNAL_TOKENS)) return 'food_concept';
+
+  // Site search is usually the strongest direct intent signal; keep it as food concept unless clearly noisy.
+  if (source.includes('search') && !isLikelyNavNoiseTerm(term)) return 'food_concept';
+  return 'nav_noise';
 }
 
 // --- Generic food term blocklist (same as discover.ts) ---
@@ -556,6 +769,7 @@ const GENERIC_BLOCKLIST = new Set([
 
 function isGenericTerm(term: string): boolean {
   const normalized = term.toLowerCase().trim();
+  if (isLikelyNavNoiseTerm(normalized)) return true;
   if (GENERIC_BLOCKLIST.has(normalized)) return true;
   if (normalized.split(/\s+/).length === 1 && normalized.length < 8) return true;
   return false;
@@ -640,10 +854,14 @@ Return a JSON array of objects with "index" (1-based, matching the entry number)
 }
 
 function normalizeTermKey(term: string): string {
-  return term
+  const tokens = term
     .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .split(' ')
+    .filter((token) => token && !MATCH_STOPWORDS.has(token));
+  return tokens.join(' ');
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -701,6 +919,7 @@ async function persistBacktestResults(candidates: TrendAnalysis[]): Promise<void
     const id = existingIds.get(key);
     const row: Record<string, unknown> = {
       term: candidate.term,
+      term_type: candidate.termType,
       source: candidate.source,
       raw_key: candidate.rawKey,
       composite_score: candidate.compositeScore,
@@ -738,18 +957,26 @@ async function discoverTerms(autoQueue: boolean): Promise<{
   stats: Record<string, number>;
 }> {
   // 1. Mine all 4 GA4 data sources in parallel
-  const [pathData, titleData, searchData, organicData] = await Promise.all([
+  const [pathData, titleData, searchResult, organicData] = await Promise.all([
     minePagePaths().catch(() => new Map<string, MonthlyBucket[]>()),
     minePageTitles().catch(() => new Map<string, MonthlyBucket[]>()),
-    mineSiteSearch().catch(() => new Map<string, MonthlyBucket[]>()),
+    mineSiteSearch().catch(() => ({
+      data: new Map<string, MonthlyBucket[]>(),
+      stats: { eventRows: 0, acceptedRows: 0, configured: false, eventsFound: [] },
+    })),
     mineOrganicLandings().catch(() => new Map<string, MonthlyBucket[]>()),
   ]);
+  const searchData = searchResult.data;
 
   const stats = {
     paths: pathData.size,
     titles: titleData.size,
     searches: searchData.size,
     organicLandings: organicData.size,
+    siteSearchEventRows: searchResult.stats.eventRows,
+    siteSearchAcceptedRows: searchResult.stats.acceptedRows,
+    siteSearchConfigured: searchResult.stats.configured ? 1 : 0,
+    siteSearchEventTypes: searchResult.stats.eventsFound.length,
   };
 
   // 2. Build raw candidate list for Gemini extraction
@@ -800,7 +1027,8 @@ async function discoverTerms(autoQueue: boolean): Promise<{
   const addTermData = (rawKey: string, source: string, buckets: MonthlyBucket[]) => {
     const term = keyToTerm.get(rawKey);
     if (!term) return;
-    const normalized = term.toLowerCase();
+    const normalized = normalizeTermKey(term);
+    if (!normalized) return;
     if (!termDataMap.has(normalized)) termDataMap.set(normalized, []);
     termDataMap.get(normalized)!.push({ source, rawKey, buckets });
   };
@@ -829,7 +1057,8 @@ async function discoverTerms(autoQueue: boolean): Promise<{
     }
 
     // Use the best display term (from keyToTerm, pick the first one)
-    const displayTerm = keyToTerm.get(entries[0].rawKey) || normalizedTerm;
+    const displayTerm = keyToTerm.get(entries[0].rawKey)
+      || normalizedTerm.split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     const sources = [...new Set(entries.map(e => e.source))].join('+');
 
     const analysis = analyzeTrend(displayTerm, sources, entries[0].rawKey, [...monthMap.values()]);
@@ -839,22 +1068,31 @@ async function discoverTerms(autoQueue: boolean): Promise<{
   // 7. Sort by composite score descending
   analyses.sort((a, b) => b.compositeScore - a.compositeScore);
 
+  const qualityFiltered = analyses.filter((analysis) => {
+    if (analysis.termType === 'nav_noise') return false;
+    if (isGenericTerm(analysis.term)) return false;
+    if (analysis.term.trim().toLowerCase() === '(not set)') return false;
+    return analysis.compositeScore >= 12;
+  });
+
   // 8. Persist analyzed terms as reusable GA4 priors for discover/trends.
-  await persistBacktestResults(analyses);
+  await persistBacktestResults(qualityFiltered);
 
   // 9. Filter against already-tracked terms
-  let filtered = analyses;
+  let filtered = qualityFiltered;
   if (supabase) {
     const { data: tracked } = await supabase.from('trends').select('term');
-    const trackedSet = new Set((tracked || []).map((t: any) => t.term.toLowerCase()));
-    filtered = analyses.filter(a => !trackedSet.has(a.term.toLowerCase()));
+    const trackedSet = new Set((tracked || []).map((t: any) => normalizeTermKey(String(t.term || ''))));
+    filtered = qualityFiltered.filter((a) => !trackedSet.has(normalizeTermKey(a.term)));
   }
 
   // 10. Optionally auto-queue top candidates
   const queued: string[] = [];
   if (autoQueue && supabase) {
     // Queue top 20 candidates with positive composite score
-    const toQueue = filtered.filter(a => a.compositeScore > 15).slice(0, 20);
+    const toQueue = filtered
+      .filter((a) => (a.termType === 'food_concept' || a.termType === 'offer_type') && a.compositeScore > 18)
+      .slice(0, 20);
     for (const candidate of toQueue) {
       try {
         // Check not already queued
@@ -866,7 +1104,7 @@ async function discoverTerms(autoQueue: boolean): Promise<{
         if (!existing) {
           await supabase.from('discovery_queue').insert({
             term: candidate.term,
-            source: `GA4 Backtest (${candidate.source})`,
+            source: `GA4 Backtest (${candidate.source}; ${candidate.termType})`,
             initial_score: Math.round(Math.min(100, Math.max(0, candidate.compositeScore))),
             status: 'pending',
           });
@@ -1087,6 +1325,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       queuedTerms: result.queued,
       candidates: result.candidates.slice(0, 50).map(c => ({
         term: c.term,
+        termType: c.termType,
         source: c.source,
         compositeScore: c.compositeScore,
         totalViews: c.totalViews,

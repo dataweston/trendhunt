@@ -75,6 +75,17 @@ const DEMO_TERMS = new Set([
   'Ube Lattes',
 ]);
 
+const MATCH_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'by', 'with',
+  'minneapolis', 'saint', 'st', 'paul', 'mn', 'local', 'effort',
+]);
+const GA4_BOOSTABLE_TYPES = new Set(['food_concept', 'offer_type']);
+const NAV_NOISE_TOKENS = [
+  '(not set)', 'about', 'contact', 'privacy', 'terms', 'account', 'login', 'calendar', 'portal',
+  'partner', 'partners', 'wedding', 'weddings', 'release', 'releases', 'crowdfunding', 'gallery',
+  'master calendar', 'our purveyors', 'services',
+];
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -110,7 +121,7 @@ interface ScoreComponents {
 }
 
 const WEIGHTS: Record<string, number> = {
-  OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 1.7,
+  OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 0.8,
   GoogleSearch: 2.8, DoorDash: 1.3, Reddit: 1.0,
   TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
   Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, Wildchat: 0.4, RedditPushshift: 0.3,
@@ -188,7 +199,7 @@ const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): numbe
   score += activeSerpSignals.length * 7;
   if (hasSales) score += 15;
   if (hasTraffic) score += 8;
-  if (hasBacktest) score += 10;
+  if (hasBacktest) score += 4;
   if (hasZip) score += 5;
   return clampScore(score);
 };
@@ -223,7 +234,7 @@ const buildEvidence = (
   if (google > 0) evidence.push(`Google Trends local interest signal: ${google}/100.`);
   if (yelp > 0 || maps > 0) evidence.push(`Local listings density (Yelp ${yelp}, Maps ${maps}).`);
   if (sales > 0) evidence.push(`Observed in-store/online sales proxy present (${sales}/100).`);
-  if (backtest > 0) evidence.push(`GA4 backtest history reinforces term momentum (${backtest}/100).`);
+  if (backtest > 0) evidence.push(`GA4 backtest prior provides calibration context (${backtest}/100).`);
   if (scores.serpapiShare > 0) evidence.push(`SerpAPI contributes ${scores.serpapiShare}% of active signal intensity.`);
 
   return evidence;
@@ -655,21 +666,134 @@ async function fetchGA4Traffic(term: string): Promise<SignalData> {
   } catch (e) { console.error('GA4 fetch error:', e); return empty; }
 }
 
+interface GA4BacktestPriorRow {
+  term: string;
+  key: string;
+  composite_score: number;
+  growth_rate: number;
+  term_type?: string | null;
+}
+
+let _ga4BacktestIndexCache: { expiresAt: number; rows: GA4BacktestPriorRow[]; byKey: Map<string, GA4BacktestPriorRow> } | null = null;
+
+function normalizeTermKey(term: string): string {
+  const tokens = term
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((token) => token && !MATCH_STOPWORDS.has(token));
+  return tokens.join(' ');
+}
+
+function isLikelyNavNoise(term: string): boolean {
+  const normalized = term.toLowerCase().trim();
+  if (!normalized || normalized === '(not set)') return true;
+  return NAV_NOISE_TOKENS.some((token) => normalized.includes(token));
+}
+
+function similarityScore(a: string, b: string): number {
+  const ak = normalizeTermKey(a);
+  const bk = normalizeTermKey(b);
+  if (!ak || !bk) return 0;
+  if (ak === bk) return 1;
+  if (ak.includes(bk) || bk.includes(ak)) return 0.9;
+  const aTokens = new Set(ak.split(' ').filter(Boolean));
+  const bTokens = new Set(bk.split(' ').filter(Boolean));
+  if (!aTokens.size || !bTokens.size) return 0;
+  const intersect = [...aTokens].filter((token) => bTokens.has(token)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  return union > 0 ? intersect / union : 0;
+}
+
+async function loadGA4BacktestIndex(): Promise<{ rows: GA4BacktestPriorRow[]; byKey: Map<string, GA4BacktestPriorRow> }> {
+  if (_ga4BacktestIndexCache && Date.now() < _ga4BacktestIndexCache.expiresAt) {
+    return { rows: _ga4BacktestIndexCache.rows, byKey: _ga4BacktestIndexCache.byKey };
+  }
+
+  const rows: GA4BacktestPriorRow[] = [];
+  const byKey = new Map<string, GA4BacktestPriorRow>();
+  if (!supabase) return { rows, byKey };
+
+  const primary = await supabase
+    .from('ga4_backtest_results')
+    .select('term, composite_score, growth_rate, term_type')
+    .order('composite_score', { ascending: false })
+    .limit(700);
+
+  let dataRows: any[] = [];
+  let hasTermType = false;
+  if (!primary.error && primary.data) {
+    dataRows = primary.data as any[];
+    hasTermType = true;
+  } else {
+    const fallback = await supabase
+      .from('ga4_backtest_results')
+      .select('term, composite_score, growth_rate')
+      .order('composite_score', { ascending: false })
+      .limit(700);
+    if (!fallback.error && fallback.data) dataRows = fallback.data as any[];
+  }
+
+  if (dataRows.length > 0) {
+    for (const row of dataRows) {
+      const term = String(row.term || '').trim();
+      const key = normalizeTermKey(term);
+      if (!key) continue;
+      const termType = hasTermType
+        ? String(row.term_type || 'nav_noise')
+        : (isLikelyNavNoise(term) ? 'nav_noise' : 'food_concept');
+      if (!GA4_BOOSTABLE_TYPES.has(termType)) continue;
+
+      const prior: GA4BacktestPriorRow = {
+        term,
+        key,
+        composite_score: Number(row.composite_score || 0),
+        growth_rate: Number(row.growth_rate || 0),
+        term_type: row.term_type,
+      };
+      const existing = byKey.get(key);
+      if (!existing || prior.composite_score > existing.composite_score) {
+        byKey.set(key, prior);
+      }
+    }
+  }
+
+  for (const row of byKey.values()) rows.push(row);
+  _ga4BacktestIndexCache = { rows, byKey, expiresAt: Date.now() + 10 * 60_000 };
+  return { rows, byKey };
+}
+
+function findBestGA4Prior(term: string, index: { rows: GA4BacktestPriorRow[]; byKey: Map<string, GA4BacktestPriorRow> }): GA4BacktestPriorRow | null {
+  const key = normalizeTermKey(term);
+  if (!key) return null;
+  const direct = index.byKey.get(key);
+  if (direct) return direct;
+
+  let best: GA4BacktestPriorRow | null = null;
+  let bestScore = 0;
+  for (const candidate of index.rows) {
+    const score = similarityScore(key, candidate.key);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return bestScore >= 0.62 ? best : null;
+}
+
 async function fetchGA4BacktestSignal(term: string): Promise<SignalData> {
   const empty: SignalData = { platform: Platform.GA4Backtest, currentIntensity: 0, velocity: 0, history: [] };
   if (!supabase) return empty;
   try {
-    const { data, error } = await supabase
-      .from('ga4_backtest_results')
-      .select('composite_score, growth_rate')
-      .ilike('term', term)
-      .order('composite_score', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error || !data) return empty;
+    const index = await loadGA4BacktestIndex();
+    const prior = findBestGA4Prior(term, index);
+    if (!prior) return empty;
 
-    const intensity = clampScore(Number(data.composite_score || 0));
-    const velocity = Math.max(-20, Math.min(20, Math.round(Number(data.growth_rate || 0) / 10)));
+    // Calibration prior only - dampen direct impact in live scoring.
+    const intensity = clampScore(Math.round(Number(prior.composite_score || 0) * 0.65));
+    const velocity = Math.max(-20, Math.min(20, Math.round(Number(prior.growth_rate || 0) / 15)));
     return {
       platform: Platform.GA4Backtest,
       currentIntensity: intensity,
