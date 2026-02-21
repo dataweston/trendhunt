@@ -11,7 +11,8 @@ const PLATFORM_WEIGHTS: Record<Platform, number> = {
   [Platform.Pinterest]: 1.2,    // Visual interest / planning (Demand)
   [Platform.GoogleSearch]: 1.0,  // General intent
   [Platform.MetaAds]: 0.8,      // Ad performance feedback
-  [Platform.Wildchat]: 0.6,     // LLM curiosity signal
+  [Platform.ConversationalSearch]: 1.2, // "near me" search intent — latent demand without local supply
+  [Platform.LocalRedditIntent]: 1.3,   // Local community question posts — active seeking without finding
   [Platform.Yelp]: 0.5,         // Established supply (Supply indicator)
   [Platform.DoorDash]: 0.5,     // Established supply (Supply indicator)
   [Platform.GoogleMaps]: 0.5,   // Local supply density (Supply indicator)
@@ -35,7 +36,8 @@ const DEMAND_PLATFORMS = new Set<Platform>([
   Platform.GoogleSearch,
   Platform.DoorDash,
   Platform.MetaAds,
-  Platform.Wildchat,
+  Platform.ConversationalSearch,
+  Platform.LocalRedditIntent,
 ]);
 
 /**

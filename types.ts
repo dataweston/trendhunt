@@ -6,7 +6,6 @@ export enum Platform {
   DoorDash = 'DoorDash',
   Pinterest = 'Pinterest',
   RedditPushshift = 'RedditPushshift',
-  Wildchat = 'Wildchat',
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
   GA4Backtest = 'GA4Backtest',
@@ -14,6 +13,8 @@ export enum Platform {
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
   GoogleMaps = 'GoogleMaps',
+  ConversationalSearch = 'ConversationalSearch',
+  LocalRedditIntent = 'LocalRedditIntent',
 }
 
 export interface TimeSeriesPoint {
@@ -26,29 +27,51 @@ export interface SignalData {
   history: TimeSeriesPoint[];
   currentIntensity: number;
   velocity: number; // Change over last period
+  supplyQuality?: number; // 0-100, only set for Yelp/GoogleMaps signals (Module 4)
+}
+
+// Trend state from social-vs-search lead-lag detection (Module 3)
+export type TrendState = 'PRE_PEAK' | 'AT_PEAK' | 'POST_PEAK' | 'INSUFFICIENT_DATA';
+
+// Per-term funnel metrics from GA4 (Module 5)
+export interface TermFunnel {
+  term: string;
+  searchImpressions: number;
+  pageViews: number;
+  conversionEvents: number;
+  conversionRate: number;
+  dropoffStage: 'no_page' | 'low_conversion' | 'healthy' | 'unknown';
+  geminiDiagnosis?: string;
 }
 
 export interface TrendEntity {
   id: string;
-  term: string; // e.g., "Birria Tacos"
-  category: string; // e.g., "Mexican"
-  region: string; // e.g., "Minneapolis–St Paul"
-  neighborhood: string; // e.g. "North Loop"
+  term: string;
+  category: string;
+  region: string;
+  neighborhood: string;
   zipCode?: string;
   signals: SignalData[];
-  intentScore: number; // 0-100 local intent
-  availabilityScore: number; // 0-100 local availability
-  realizationScore: number; // 0-100 local purchase realization
-  gapScore: number; // 0-100 unmet demand gap
-  confidenceScore: number; // 0-100 score confidence
-  serpapiShare: number; // 0-100 signal share from SerpAPI-backed sources
-  serpapiSignals: string[]; // contributing SerpAPI-backed platforms
-  evidence: string[]; // short explanatory evidence lines
-  supplyScore: number; // 0-100 (100 = saturated)
-  demandScore: number; // 0-100 (100 = viral)
-  unmetDemandScore: number; // Calculated (Demand - Supply)
-  breakoutProbability: number; // 0-100%
-  predictedBreakoutWeek: number; // estimated week number
+  intentScore: number;
+  availabilityScore: number;
+  realizationScore: number;
+  gapScore: number;
+  confidenceScore: number;
+  serpapiShare: number;
+  serpapiSignals: string[];
+  evidence: string[];
+  supplyScore: number;
+  demandScore: number;
+  unmetDemandScore: number;
+  breakoutProbability: number;
+  predictedBreakoutWeek: number;
+  // Module 3: Lead-lag detection
+  trendState?: TrendState;
+  leadLagWeeks?: number;
+  trendStateNarrative?: string;
+  // Module 5: Funnel attribution
+  conversionDeficitScore?: number;
+  funnelData?: TermFunnel;
 }
 
 export interface GeoRegion {
@@ -72,6 +95,8 @@ export interface DiscoveryQueueItem {
   initial_score: number;
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
+  business_fit_score?: number;
+  business_fit_rationale?: string;
 }
 
 export interface ProductPageDraft {

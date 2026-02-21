@@ -25,14 +25,14 @@ let authFailureUntil = 0;
 
 // --- TTL by query type (hours) ---
 const TTL: Record<string, number> = {
-  google_trends_timeseries: 24,     // trends change daily, not hourly
-  google_trends_related: 48,        // rising queries shift slowly
+  google_trends_timeseries: 72,     // budget constraint: <1000 calls/month; trends shift weekly not daily
+  google_trends_related: 72,        // rising queries shift slowly
   google_light: 72,                 // discovery scans — weekly-ish
-  google: 24,                       // full enrichment (also used for TikTok site: searches)
+  google: 48,                       // TikTok site: searches — budget constraint
   google_maps: 168,                 // supplier/business data — weekly
-  google_news: 12,                  // news changes fast, cache half-day
+  google_news: 48,                  // food trend news doesn't change hourly; budget constraint
   youtube: 48,                      // video results shift slowly
-  yelp: 24,                         // yelp restaurant data — daily refresh
+  yelp: 72,                         // yelp restaurant data — budget constraint
 };
 
 // --- Cache key ---

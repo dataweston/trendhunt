@@ -137,6 +137,18 @@ Generate:
       return res.status(500).json({ error: `Failed to save draft: ${saveError.message}` });
     }
 
+    // Module 7: Update launch_decision with the page slug
+    const pageSlug = `/menu/${trend.term.toLowerCase().replace(/\s+/g, '-')}`;
+    try {
+      await supabase
+        .from('launch_decisions')
+        .update({ page_url: pageSlug })
+        .eq('term', trend.term)
+        .eq('outcome', 'pending');
+    } catch (e) {
+      console.error('launch_decisions page_url update (non-fatal):', e);
+    }
+
     // Optionally push to Sanity CMS
     if (SANITY_PROJECT_ID && SANITY_TOKEN) {
       try {

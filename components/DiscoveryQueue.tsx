@@ -194,6 +194,20 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
                   <div className="flex items-center gap-2">
                     <Sparkles size={14} className="text-amber-400 shrink-0" />
                     <span className="text-sm text-white font-medium truncate">{item.term}</span>
+                    {item.business_fit_score != null && (
+                      <span
+                        className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                          item.business_fit_score >= 80
+                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                            : item.business_fit_score >= 65
+                            ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                            : 'bg-slate-500/15 text-slate-400 border-slate-500/30'
+                        }`}
+                        title={item.business_fit_rationale ?? ''}
+                      >
+                        Fit {item.business_fit_score}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-3 mt-1">
                     <span className="text-[10px] text-slate-500">{item.source}</span>

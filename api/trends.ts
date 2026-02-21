@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { serpSearch, getUsageStats } from '../lib/serp-governor.js';
 import { isAdminRequest } from '../lib/api-auth.js';
 import { getLocationContext, type LocationContext } from '../lib/location.js';
+import { normalizeTermKey, similarityScore } from '../lib/term-normalizer.js';
 
 // --- Types (standalone for serverless) ---
 enum Platform {
@@ -14,7 +15,6 @@ enum Platform {
   DoorDash = 'DoorDash',
   Pinterest = 'Pinterest',
   RedditPushshift = 'RedditPushshift',
-  Wildchat = 'Wildchat',
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
   GA4Backtest = 'GA4Backtest',
@@ -22,6 +22,8 @@ enum Platform {
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
   GoogleMaps = 'GoogleMaps',
+  ConversationalSearch = 'ConversationalSearch',
+  LocalRedditIntent = 'LocalRedditIntent',
 }
 
 interface SignalData {
@@ -29,6 +31,17 @@ interface SignalData {
   history: { week: number; value: number }[];
   currentIntensity: number;
   velocity: number;
+  supplyQuality?: number; // 0-100, set on Yelp/GoogleMaps signals (Module 4)
+}
+
+interface TermFunnel {
+  term: string;
+  searchImpressions: number;
+  pageViews: number;
+  conversionEvents: number;
+  conversionRate: number;
+  dropoffStage: 'no_page' | 'low_conversion' | 'healthy' | 'unknown';
+  geminiDiagnosis?: string;
 }
 
 interface TrendEntity {
@@ -52,6 +65,13 @@ interface TrendEntity {
   unmetDemandScore: number;
   breakoutProbability: number;
   predictedBreakoutWeek: number;
+  // Module 3: Lead-lag
+  trendState?: string;
+  leadLagWeeks?: number;
+  trendStateNarrative?: string;
+  // Module 5: Funnel attribution
+  conversionDeficitScore?: number;
+  funnelData?: TermFunnel;
 }
 
 // --- Config ---
@@ -75,10 +95,7 @@ const DEMO_TERMS = new Set([
   'Ube Lattes',
 ]);
 
-const MATCH_STOPWORDS = new Set([
-  'a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'by', 'with',
-  'minneapolis', 'saint', 'st', 'paul', 'mn', 'local', 'effort',
-]);
+
 const GA4_BOOSTABLE_TYPES = new Set(['food_concept', 'offer_type']);
 const NAV_NOISE_TOKENS = [
   '(not set)', 'about', 'contact', 'privacy', 'terms', 'account', 'login', 'calendar', 'portal',
@@ -124,7 +141,8 @@ const WEIGHTS: Record<string, number> = {
   OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 0.8,
   GoogleSearch: 2.8, DoorDash: 1.3, Reddit: 1.0,
   TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
-  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, Wildchat: 0.4, RedditPushshift: 0.3,
+  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, RedditPushshift: 0.3,
+  ConversationalSearch: 1.2, LocalRedditIntent: 1.3,
 };
 const SUPPLY = new Set<Platform>([Platform.Yelp, Platform.GoogleMaps]);
 const SERPAPI_PLATFORMS = new Set<Platform>([
@@ -135,6 +153,7 @@ const SERPAPI_PLATFORMS = new Set<Platform>([
   Platform.YouTube,
   Platform.GoogleNews,
   Platform.GoogleMaps,
+  Platform.ConversationalSearch,
 ]);
 
 function clampScore(value: number): number {
@@ -231,10 +250,22 @@ const buildEvidence = (
   evidence.push(`Realization ${scores.realizationScore}/100 from owned sales/traffic signals.`);
   evidence.push(`Gap ${scores.gapScore}/100 indicates unserved demand in current local supply.`);
 
+  const convSearch = byPlatform.get(Platform.ConversationalSearch)?.currentIntensity || 0;
+  const localRedditIntent = byPlatform.get(Platform.LocalRedditIntent)?.currentIntensity || 0;
+
   if (google > 0) evidence.push(`Google Trends local interest signal: ${google}/100.`);
-  if (yelp > 0 || maps > 0) evidence.push(`Local listings density (Yelp ${yelp}, Maps ${maps}).`);
+  if (yelp > 0 || maps > 0) {
+    const yelpSig = byPlatform.get(Platform.Yelp);
+    const mapsSig = byPlatform.get(Platform.GoogleMaps);
+    const qualityNote = (yelpSig?.supplyQuality != null || mapsSig?.supplyQuality != null)
+      ? ` Competitive quality index: Yelp ${yelpSig?.supplyQuality ?? '--'}/100, Maps ${mapsSig?.supplyQuality ?? '--'}/100.`
+      : '';
+    evidence.push(`Local listings density (Yelp ${yelp}, Maps ${maps}).${qualityNote}`);
+  }
   if (sales > 0) evidence.push(`Observed in-store/online sales proxy present (${sales}/100).`);
   if (backtest > 0) evidence.push(`GA4 backtest prior provides calibration context (${backtest}/100).`);
+  if (convSearch > 0) evidence.push(`Question-form search interest ("near me"): ${convSearch}/100 — latent demand without local supply.`);
+  if (localRedditIntent > 0) evidence.push(`Local community question posts: ${localRedditIntent}/100 — people actively seeking but not finding locally.`);
   if (scores.serpapiShare > 0) evidence.push(`SerpAPI contributes ${scores.serpapiShare}% of active signal intensity.`);
 
   return evidence;
@@ -339,28 +370,45 @@ async function fetchSerpDelivery(term: string, context: LocationContext): Promis
   } catch { return empty; }
 }
 
+/** Supply quality score: blends listing density with average rating × review depth (0–100). */
+function calcSupplyQuality(specificCount: number, ratings: number[], reviewCounts: number[]): number {
+  const densityScore = Math.min(1, specificCount / 10);
+  if (!ratings.length) return Math.round(densityScore * 100);
+  // Quality = avg(rating/5 * log10(reviews+1)/3) clamped 0–1
+  const qualityScores = ratings.map((r, i) =>
+    (r / 5) * Math.min(1, Math.log10((reviewCounts[i] || 0) + 1) / 3)
+  );
+  const avgQuality = qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length;
+  return Math.round((densityScore * 0.5 + avgQuality * 0.5) * 100);
+}
+
 async function fetchYelp(term: string, context: LocationContext): Promise<SignalData> {
-  // Use SerpAPI's yelp engine instead of direct Yelp API (no Yelp key needed)
   try {
     const result = await serpSearch({ engine: 'yelp', find_desc: term, find_loc: context.yelpLocation });
     if (!result.data) return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] };
     const results = result.data.organic_results || [];
-    // Only count results that specifically mention the term (not just generic restaurants)
     const termLower = term.toLowerCase();
     let specificCount = 0;
+    const ratings: number[] = [];
+    const reviewCounts: number[] = [];
     for (const r of results) {
       const cats = (r.categories || []).map((c: any) => (c.title || c || '').toLowerCase()).join(' ');
       const title = (r.title || '').toLowerCase();
       const snippet = (r.snippet || '').toLowerCase();
       if (cats.includes(termLower) || title.includes(termLower) || snippet.includes(termLower)) {
         specificCount++;
+        const rating = parseFloat(r.rating ?? r.stars ?? '0') || 0;
+        const reviews = parseInt(String(r.reviews ?? r.review_count ?? '0').replace(/[^0-9]/g, ''), 10) || 0;
+        if (rating > 0) { ratings.push(rating); reviewCounts.push(reviews); }
       }
     }
-    // Scale: 1 specific match = 15, 5 = 75, 7+ = 100
+    const supplyQuality = calcSupplyQuality(specificCount, ratings, reviewCounts);
     return {
       platform: Platform.Yelp,
       currentIntensity: Math.min(100, specificCount * 15),
-      velocity: 0, history: [],
+      velocity: 0,
+      history: [],
+      supplyQuality,
     };
   } catch { return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] }; }
 }
@@ -478,37 +526,113 @@ async function fetchGoogleNews(term: string, context: LocationContext): Promise<
 }
 
 async function fetchGoogleMaps(term: string, context: LocationContext): Promise<SignalData> {
-  // SerpAPI Google Maps - local supply density (how many places serve this)
   try {
     const locationQuery = context.hasZip ? `${term} ${context.queryHint}` : `${term} ${context.regionLabel}`;
     const result = await serpSearch({ engine: 'google_maps', q: locationQuery, type: 'search' });
     if (!result.data) return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] };
     const places = result.data.local_results || [];
-    // Only count places that specifically reference the term
     const termLower = term.toLowerCase();
     let specificCount = 0;
+    const ratings: number[] = [];
+    const reviewCounts: number[] = [];
     for (const p of places) {
       const title = (p.title || '').toLowerCase();
       const type = (p.type || '').toLowerCase();
       const desc = (p.description || '').toLowerCase();
       if (title.includes(termLower) || type.includes(termLower) || desc.includes(termLower)) {
         specificCount++;
+        const rating = parseFloat(p.rating ?? '0') || 0;
+        const reviews = parseInt(String(p.reviews ?? '0').replace(/[^0-9]/g, ''), 10) || 0;
+        if (rating > 0) { ratings.push(rating); reviewCounts.push(reviews); }
       }
     }
-    // Scale: 3 specific places = 30, 7 = 70, 10+ = 100
-    const intensity = Math.min(100, specificCount * 10);
-    return { platform: Platform.GoogleMaps, currentIntensity: intensity, velocity: 0, history: [] };
+    const supplyQuality = calcSupplyQuality(specificCount, ratings, reviewCounts);
+    return {
+      platform: Platform.GoogleMaps,
+      currentIntensity: Math.min(100, specificCount * 10),
+      velocity: 0,
+      history: [],
+      supplyQuality,
+    };
   } catch { return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchWildchat(term: string): Promise<SignalData> {
+async function fetchConversationalSearch(term: string, context: LocationContext): Promise<SignalData> {
+  // Google Trends for "{term} near me" — captures latent demand where people know what they
+  // want but don't know where to find it locally. Single SerpAPI call (budget-constrained).
+  // Cached 72h (google_trends_related TTL) since near-me trends shift slowly.
   try {
-    const { data } = await axios.get('https://datasets-server.huggingface.co/search', {
-      params: { dataset: 'allenai/WildChat-1M', config: 'default', split: 'train', query: term, offset: 0, limit: 10 },
-      timeout: EXTERNAL_TIMEOUT_MS,
+    const result = await serpSearch({
+      engine: 'google_trends',
+      q: `${term} near me`,
+      geo: context.serpGeo,
+      data_type: 'TIMESERIES',
     });
-    return { platform: Platform.Wildchat, currentIntensity: Math.min(100, (data.rows?.length || 0) * 10), velocity: 0, history: [] };
-  } catch { return { platform: Platform.Wildchat, currentIntensity: 0, velocity: 0, history: [] }; }
+    if (!result.data) return { platform: Platform.ConversationalSearch, currentIntensity: 0, velocity: 0, history: [] };
+
+    const timeline = result.data?.interest_over_time?.timeline_data || [];
+    const values: number[] = timeline.map((point: any) => Number(point.values?.[0]?.value || 0));
+
+    if (values.length === 0) return { platform: Platform.ConversationalSearch, currentIntensity: 0, velocity: 0, history: [] };
+
+    const currentIntensity = Math.min(100, values[values.length - 1]);
+    const prevIntensity = values.length >= 2 ? values[values.length - 2] : currentIntensity;
+    const velocity = Math.max(-20, Math.min(20, currentIntensity - prevIntensity));
+    const history = values.map((value, i) => ({ week: i + 1, value: Math.round(value) }));
+
+    return { platform: Platform.ConversationalSearch, currentIntensity, velocity, history };
+  } catch { return { platform: Platform.ConversationalSearch, currentIntensity: 0, velocity: 0, history: [] }; }
+}
+
+async function fetchLocalRedditIntent(term: string, context: LocationContext): Promise<SignalData> {
+  // Reddit question-pattern posts in local subreddits — "where can I find X near Minneapolis?"
+  // These represent someone with a specific desire and no known local supply: the highest-quality
+  // latent demand signal available from public data.
+  const QUESTION_PATTERN = /\b(where|looking for|anyone know|can i find|near me|recommend|suggestions|does anyone|tried|found)\b/i;
+  try {
+    const localSubs = context.hasZip
+      ? 'Minneapolis+TwinCities+minnesota+food'
+      : 'food+foodporn+askculinary';
+
+    const localQuery = `${term} (where OR "looking for" OR "anyone know" OR "can I find" OR "near me")`;
+    const globalQuery = `${term} food restaurant ("where can I find" OR "looking for" OR "near me" OR "does anyone know")`;
+
+    const [localResult, globalResult] = await Promise.all([
+      axios.get('https://www.reddit.com/r/' + localSubs + '/search.json', {
+        params: { q: localQuery, sort: 'new', limit: 25, restrict_sr: 'on' },
+        headers: { 'User-Agent': 'TrendHunter/2.0' },
+        timeout: EXTERNAL_TIMEOUT_MS,
+      }).catch(() => null),
+      axios.get('https://www.reddit.com/search.json', {
+        params: { q: globalQuery, sort: 'new', limit: 25 },
+        headers: { 'User-Agent': 'TrendHunter/2.0' },
+        timeout: EXTERNAL_TIMEOUT_MS,
+      }).catch(() => null),
+    ]);
+
+    const localPosts = localResult?.data?.data?.children || [];
+    const globalPosts = globalResult?.data?.data?.children || [];
+    const allPosts = [...localPosts, ...globalPosts];
+
+    const now = Date.now() / 1000;
+    let questionPostCount = 0;
+    let recentQuestionCount = 0;
+
+    for (const post of allPosts) {
+      const title = post.data?.title || '';
+      if (QUESTION_PATTERN.test(title)) {
+        questionPostCount++;
+        if ((now - (post.data?.created_utc || 0)) < 172800) { // 48h
+          recentQuestionCount++;
+        }
+      }
+    }
+
+    const currentIntensity = Math.min(100, questionPostCount * 15);
+    const velocity = Math.min(20, recentQuestionCount * 10);
+
+    return { platform: Platform.LocalRedditIntent, currentIntensity, velocity, history: [] };
+  } catch { return { platform: Platform.LocalRedditIntent, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
 async function fetchSquareSales(term: string): Promise<SignalData> {
@@ -676,35 +800,10 @@ interface GA4BacktestPriorRow {
 
 let _ga4BacktestIndexCache: { expiresAt: number; rows: GA4BacktestPriorRow[]; byKey: Map<string, GA4BacktestPriorRow> } | null = null;
 
-function normalizeTermKey(term: string): string {
-  const tokens = term
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter((token) => token && !MATCH_STOPWORDS.has(token));
-  return tokens.join(' ');
-}
-
 function isLikelyNavNoise(term: string): boolean {
   const normalized = term.toLowerCase().trim();
   if (!normalized || normalized === '(not set)') return true;
   return NAV_NOISE_TOKENS.some((token) => normalized.includes(token));
-}
-
-function similarityScore(a: string, b: string): number {
-  const ak = normalizeTermKey(a);
-  const bk = normalizeTermKey(b);
-  if (!ak || !bk) return 0;
-  if (ak === bk) return 1;
-  if (ak.includes(bk) || bk.includes(ak)) return 0.9;
-  const aTokens = new Set(ak.split(' ').filter(Boolean));
-  const bTokens = new Set(bk.split(' ').filter(Boolean));
-  if (!aTokens.size || !bTokens.size) return 0;
-  const intersect = [...aTokens].filter((token) => bTokens.has(token)).length;
-  const union = new Set([...aTokens, ...bTokens]).size;
-  return union > 0 ? intersect / union : 0;
 }
 
 async function loadGA4BacktestIndex(): Promise<{ rows: GA4BacktestPriorRow[]; byKey: Map<string, GA4BacktestPriorRow> }> {
@@ -868,14 +967,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('x-trendhunt-serpapi-primary', 'true');
 
     const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
-      const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, backtest, youtube, news, maps] = await Promise.all([
+      const [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, youtube, news, maps] = await Promise.all([
         fetchYelp(item.term, location),
         fetchReddit(item.term, location),
         fetchSerpTrends(item.term, location),
         fetchTikTokSerp(item.term, location),
         fetchPinterestProxy(item.term),
         fetchSerpDelivery(item.term, location),
-        fetchWildchat(item.term),
+        fetchConversationalSearch(item.term, location),
+        fetchLocalRedditIntent(item.term, location),
         fetchSquareSales(item.term),
         fetchGA4Traffic(item.term),
         fetchGA4BacktestSignal(item.term),
@@ -884,7 +984,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fetchGoogleMaps(item.term, location),
       ]);
 
-      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, backtest, youtube, news, maps];
+      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, youtube, news, maps];
       const components = scoreTrend(signals, location.hasZip);
       const ds = components.intentScore;
       const ss = components.availabilityScore;
@@ -947,6 +1047,59 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
       }
 
+      // Module 3: Read lead-lag state from trends table
+      let trendState: string | undefined;
+      let leadLagWeeks: number | undefined;
+      let trendStateNarrative: string | undefined;
+      if (trendId && supabase) {
+        try {
+          const { data: trendRow } = await supabase
+            .from('trends')
+            .select('trend_state, lead_lag_weeks, trend_state_narrative')
+            .eq('id', trendId)
+            .maybeSingle();
+          if (trendRow) {
+            trendState = trendRow.trend_state ?? undefined;
+            leadLagWeeks = trendRow.lead_lag_weeks ?? undefined;
+            trendStateNarrative = trendRow.trend_state_narrative ?? undefined;
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // Module 5: Read latest funnel row from term_funnel
+      let funnelData: TermFunnel | undefined;
+      let conversionDeficitScore: number | undefined;
+      if (supabase) {
+        try {
+          const { data: funnelRow } = await supabase
+            .from('term_funnel')
+            .select('*')
+            .eq('term', item.term)
+            .order('date', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (funnelRow) {
+            funnelData = {
+              term: funnelRow.term,
+              searchImpressions: funnelRow.search_impressions ?? 0,
+              pageViews: funnelRow.page_views ?? 0,
+              conversionEvents: funnelRow.conversion_events ?? 0,
+              conversionRate: funnelRow.conversion_rate ?? 0,
+              dropoffStage: funnelRow.dropoff_stage ?? 'unknown',
+              geminiDiagnosis: funnelRow.gemini_diagnosis ?? undefined,
+            };
+            // conversionDeficitScore: how much of the intent is going unfulfilled
+            if (funnelRow.dropoff_stage === 'no_page') {
+              conversionDeficitScore = Math.round(components.intentScore * 0.9);
+            } else if (funnelRow.dropoff_stage === 'low_conversion') {
+              conversionDeficitScore = Math.round(components.intentScore * 0.5);
+            } else if (funnelRow.dropoff_stage === 'healthy') {
+              conversionDeficitScore = Math.max(0, components.intentScore - 60);
+            }
+          }
+        } catch { /* non-fatal */ }
+      }
+
       return {
         id: trendId || item.term.replace(/\s+/g, '-').toLowerCase(),
         term: item.term,
@@ -968,6 +1121,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         unmetDemandScore: ud,
         breakoutProbability: bp,
         predictedBreakoutWeek: predicted,
+        trendState,
+        leadLagWeeks,
+        trendStateNarrative,
+        conversionDeficitScore,
+        funnelData,
       };
     });
 

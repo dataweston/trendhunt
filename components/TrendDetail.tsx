@@ -1,9 +1,30 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { TrendEntity, AnalysisResult } from '../types';
 import { analyzeTrendWithGemini } from '../services/geminiService';
-import { X, BrainCircuit, Loader2, FileText, Copy, Check } from 'lucide-react';
+import { X, BrainCircuit, Loader2, FileText, Copy, Check, TrendingUp } from 'lucide-react';
 import { TrendTimeSeries } from './Visualizations';
+import { FunnelPanel } from './FunnelPanel';
 import { getAdminHeaders } from '../services/adminAuth';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
+
+// ── Trend state badge ───────────────────────────────────────────────────────
+
+const TrendStateBadge: React.FC<{ state?: string }> = ({ state }) => {
+  if (!state || state === 'INSUFFICIENT_DATA') return null;
+  const cfg: Record<string, { label: string; className: string; pulse?: boolean }> = {
+    PRE_PEAK: { label: 'Entry Window', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', pulse: true },
+    AT_PEAK: { label: 'Act Now', className: 'bg-amber-500/15 text-amber-400 border-amber-500/30' },
+    POST_PEAK: { label: 'Saturating', className: 'bg-slate-500/20 text-slate-400 border-slate-500/30' },
+  };
+  const c = cfg[state];
+  if (!c) return null;
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-semibold border ${c.className}`}>
+      {c.pulse && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />}
+      {c.label}
+    </span>
+  );
+};
 
 interface PageDraft {
   title: string;
@@ -101,10 +122,14 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                 <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded">
                     Breakout Detected
                 </span>
+                {trend.trendState && <TrendStateBadge state={trend.trendState} />}
                 <span className="text-xs text-slate-400">{trend.region}</span>
             </div>
             <h2 className="text-3xl font-bold text-white">{trend.term}</h2>
             <p className="text-slate-400">{trend.category} • {trend.neighborhood}</p>
+            {trend.trendStateNarrative && (
+              <p className="text-sm text-indigo-300 mt-1 italic">{trend.trendStateNarrative}</p>
+            )}
           </div>
           <button 
             onClick={onClose}
@@ -170,13 +195,15 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                   Reddit: 'Reddit', TikTok: 'TikTok', Pinterest: 'Pinterest',
                   OwnTraffic: 'Your GA4 Traffic', OwnSales: 'Your Square Sales',
                   GA4Backtest: 'GA4 Backtest',
-                  Wildchat: 'LLM Mentions', MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
+                  ConversationalSearch: 'Near-Me Search', LocalRedditIntent: 'Local Questions',
+                  MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
                   YouTube: 'YouTube', GoogleNews: 'Google News', GoogleMaps: 'Google Maps Supply',
                 };
                 const colors: Record<string, string> = {
                   GoogleSearch: 'text-blue-400', Yelp: 'text-red-400', Reddit: 'text-orange-400',
                   TikTok: 'text-cyan-400', Pinterest: 'text-pink-400', OwnTraffic: 'text-violet-400',
-                  OwnSales: 'text-emerald-400', GA4Backtest: 'text-amber-400', DoorDash: 'text-red-500', Wildchat: 'text-yellow-400',
+                  OwnSales: 'text-emerald-400', GA4Backtest: 'text-amber-400', DoorDash: 'text-red-500',
+                  ConversationalSearch: 'text-violet-400', LocalRedditIntent: 'text-orange-400',
                   MetaAds: 'text-blue-500', YouTube: 'text-red-500', GoogleNews: 'text-blue-300',
                   GoogleMaps: 'text-green-400',
                 };
@@ -229,6 +256,112 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                  <div className="text-red-400">Analysis failed. Check API Key configuration.</div>
              )}
           </div>
+
+          {/* Funnel Attribution (Module 5) */}
+          {trend.funnelData && trend.funnelData.dropoffStage !== 'unknown' && (
+            <FunnelPanel funnel={trend.funnelData} />
+          )}
+
+          {/* Revenue Impact Estimate */}
+          {trend.funnelData && trend.intentScore != null && (
+            <div className="bg-slate-800/30 border border-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-3">Est. Revenue Impact</h3>
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <div className="text-2xl font-bold text-blue-400">
+                    {(trend.intentScore * 5).toLocaleString()}
+                  </div>
+                  <div className="text-[10px] text-slate-500">est. sessions / month</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-violet-400">
+                    {trend.funnelData.conversionRate > 0
+                      ? `${(trend.funnelData.conversionRate * 100).toFixed(1)}%`
+                      : '--'}
+                  </div>
+                  <div className="text-[10px] text-slate-500">your conversion rate</div>
+                </div>
+                <div>
+                  {(() => {
+                    const sessions = trend.intentScore * 5;
+                    const cvr = trend.funnelData!.conversionRate || 0.02;
+                    const aov = Number(process.env.AVG_ORDER_VALUE || 72);
+                    const mid = Math.round(sessions * cvr * aov);
+                    const lo = Math.round(mid * 0.5);
+                    const hi = Math.round(mid * 1.5);
+                    return (
+                      <>
+                        <div className="text-2xl font-bold text-emerald-400">
+                          ${lo.toLocaleString()} – ${hi.toLocaleString()}
+                        </div>
+                        <div className="text-[10px] text-slate-500">est. revenue / month (±50%)</div>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Social vs Search Timeline (Module 3) */}
+          {(() => {
+            const socialPlatforms = new Set(['TikTok', 'Reddit', 'LocalRedditIntent']);
+            const searchPlatforms = new Set(['GoogleSearch', 'ConversationalSearch']);
+            const socialSignals = trend.signals.filter(s => socialPlatforms.has(s.platform));
+            const searchSignals = trend.signals.filter(s => searchPlatforms.has(s.platform));
+            const weeks = socialSignals[0]?.history?.length || searchSignals[0]?.history?.length || 0;
+            if (weeks < 3 || (!socialSignals.length && !searchSignals.length)) return null;
+
+            const chartData = Array.from({ length: weeks }, (_, i) => {
+              const socialAvg = socialSignals.length
+                ? socialSignals.reduce((sum, s) => sum + (s.history[i]?.value ?? 0), 0) / socialSignals.length
+                : null;
+              const searchAvg = searchSignals.length
+                ? searchSignals.reduce((sum, s) => sum + (s.history[i]?.value ?? 0), 0) / searchSignals.length
+                : null;
+              return { week: i + 1, social: socialAvg !== null ? Math.round(socialAvg) : undefined, search: searchAvg !== null ? Math.round(searchAvg) : undefined };
+            });
+
+            const leadPoint = trend.leadLagWeeks != null && trend.leadLagWeeks > 0
+              ? weeks - trend.leadLagWeeks
+              : null;
+
+            return (
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp size={16} className="text-emerald-400" />
+                  <h3 className="text-sm font-medium text-slate-300">Social vs Search Timeline</h3>
+                  {trend.leadLagWeeks != null && trend.leadLagWeeks > 0 && (
+                    <span className="text-xs text-slate-500">Social leads search by {trend.leadLagWeeks}w</span>
+                  )}
+                </div>
+                <div className="h-52 bg-slate-800/50 rounded-lg p-3 border border-slate-700">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                      <XAxis dataKey="week" stroke="#94a3b8" tick={{ fontSize: 10 }} />
+                      <YAxis stroke="#94a3b8" tick={{ fontSize: 10 }} />
+                      <Tooltip
+                        contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6 }}
+                        labelStyle={{ color: '#e2e8f0', fontSize: 11 }}
+                        itemStyle={{ fontSize: 11 }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      {leadPoint !== null && (
+                        <ReferenceLine x={leadPoint} stroke="#10b981" strokeDasharray="4 2" label={{ value: 'Lead', fill: '#10b981', fontSize: 10 }} />
+                      )}
+                      {socialSignals.length > 0 && (
+                        <Line type="monotone" dataKey="social" name="Social (TikTok+Reddit)" stroke="#f97316" strokeWidth={2} dot={false} />
+                      )}
+                      {searchSignals.length > 0 && (
+                        <Line type="monotone" dataKey="search" name="Search (Google)" stroke="#6366f1" strokeWidth={2} dot={false} />
+                      )}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Deep Dive Chart */}
           <div>

@@ -52,14 +52,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const resolvedRegion = region || (zipCode ? `ZIP ${zipCode}` : DEFAULT_REGION_LABEL);
 
       // Insert into tracked trends
-      const { error: insertError } = await supabase.from('trends').upsert({
+      const { data: trendRow, error: insertError } = await supabase.from('trends').upsert({
         term: item.term,
         category: category || 'Uncategorized',
         neighborhood: resolvedNeighborhood,
         region: resolvedRegion,
-      }, { onConflict: 'term' });
+      }, { onConflict: 'term' }).select('id').single();
 
       if (insertError) return res.status(500).json({ error: insertError.message });
+
+      // Module 7: Insert a launch_decision row to begin outcome tracking
+      if (trendRow?.id) {
+        try {
+          // Pull the latest scores from trend_history for this term
+          const { data: latestHistory } = await supabase
+            .from('trend_history')
+            .select('gap_score, intent_score, confidence_score, trend_state')
+            .eq('trend_id', trendRow.id)
+            .order('timestamp', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          await supabase.from('launch_decisions').insert({
+            term: item.term,
+            trend_id: trendRow.id,
+            gap_score_at_launch: latestHistory?.gap_score ?? null,
+            intent_score_at_launch: latestHistory?.intent_score ?? null,
+            confidence_score_at_launch: latestHistory?.confidence_score ?? null,
+            trend_state_at_launch: latestHistory?.trend_state ?? null,
+            outcome: 'pending',
+          });
+        } catch (e) {
+          console.error('launch_decisions insert failed (non-fatal):', e);
+        }
+      }
 
       // Mark as approved
       await supabase.from('discovery_queue').update({ status: 'approved' }).eq('id', id);

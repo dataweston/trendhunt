@@ -17,6 +17,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { serpSearch } from '../lib/serp-governor.js';
 import { requireAdminAuth } from '../lib/api-auth.js';
 import { getLocationContext } from '../lib/location.js';
+import { normalizeTermKey, tokenizeKey, similarityScore, loadCanonicalMap, resolveCanonical } from '../lib/term-normalizer.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -35,10 +36,6 @@ interface GA4Prior {
 }
 
 const GA4_BOOSTABLE_TERM_TYPES = new Set<BacktestTermType>(['food_concept', 'offer_type']);
-const MATCH_STOPWORDS = new Set([
-  'a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'by', 'with',
-  'minneapolis', 'saint', 'st', 'paul', 'mn', 'local', 'effort',
-]);
 const NAV_NOISE_TOKENS = [
   '(not set)', 'about', 'contact', 'privacy', 'terms', 'account', 'login', 'calendar', 'portal',
   'partner', 'partners', 'wedding', 'weddings', 'release', 'releases', 'crowdfunding', 'gallery',
@@ -80,23 +77,6 @@ function isGenericTerm(term: string): boolean {
   return false;
 }
 
-function normalizeTermKey(term: string): string {
-  const tokens = term
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter((token) => token && !MATCH_STOPWORDS.has(token));
-  return tokens.join(' ');
-}
-
-function tokenizeKey(term: string): string[] {
-  const key = normalizeTermKey(term);
-  if (!key) return [];
-  return key.split(' ').filter(Boolean);
-}
-
 function isLikelyNavNoise(term: string): boolean {
   const normalized = term.toLowerCase().trim();
   if (!normalized || normalized === '(not set)') return true;
@@ -110,34 +90,91 @@ function inferBacktestTermType(term: string): BacktestTermType {
   return isGenericTerm(normalized) ? 'nav_noise' : 'food_concept';
 }
 
-function similarityScore(a: string, b: string): number {
-  const ak = normalizeTermKey(a);
-  const bk = normalizeTermKey(b);
-  if (!ak || !bk) return 0;
-  if (ak === bk) return 1;
-  if (ak.includes(bk) || bk.includes(ak)) return 0.9;
-  const aTokens = new Set(tokenizeKey(ak));
-  const bTokens = new Set(tokenizeKey(bk));
-  if (!aTokens.size || !bTokens.size) return 0;
-  const intersect = [...aTokens].filter((token) => bTokens.has(token)).length;
-  const union = new Set([...aTokens, ...bTokens]).size;
-  return union > 0 ? intersect / union : 0;
-}
-
-async function queueTerm(term: string, source: string, score: number) {
+async function queueTerm(
+  term: string,
+  source: string,
+  score: number,
+  opts?: { businessFitScore?: number; businessFitRationale?: string },
+) {
   if (!supabase || !term || term.length < 3 || term.length > 80) return;
   const normalized = term.trim().replace(/\s+/g, ' ');
   if (normalized.length < 3) return;
-  // Block generic food categories — these are not trends
   if (isGenericTerm(normalized)) return;
   if (isLikelyNavNoise(normalized)) return;
-  // Skip if already tracked
   const { data: existing } = await supabase.from('trends').select('id').ilike('term', normalized).maybeSingle();
   if (existing) return;
-  // Skip if already queued
   const { data: queued } = await supabase.from('discovery_queue').select('id').ilike('term', normalized).maybeSingle();
   if (queued) return;
-  await supabase.from('discovery_queue').insert({ term: normalized, source, initial_score: Math.round(score), status: 'pending' });
+  await supabase.from('discovery_queue').insert({
+    term: normalized,
+    source,
+    initial_score: Math.round(score),
+    status: 'pending',
+    business_fit_score: opts?.businessFitScore ?? null,
+    business_fit_rationale: opts?.businessFitRationale ?? null,
+  });
+}
+
+// Module 6: LLM-powered targeted discovery for Local Effort business context.
+// Returns terms with confidence >= 65 that fit the private chef / meal prep format.
+async function discoverWithGemini(existingTerms: string[]): Promise<void> {
+  if (!ai || !supabase) return;
+  try {
+    const existingList = existingTerms.slice(0, 60).join(', ');
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `You are a food trend analyst for Local Effort, a Minneapolis private chef and meal prep company.
+
+Business context:
+- Format: private chef dinners ($65-85/person) and weekly meal prep boxes ($12-25/item)
+- Customers: households and small businesses in Minneapolis metro
+- Cannot offer: street food requiring on-site cooking equipment, items needing liquor license
+- Strengths: locally-sourced Minnesota ingredients, dietary flexibility, home delivery
+
+Currently tracked terms (exclude these): ${existingList}
+
+Name 8-12 food concepts that:
+1. Are trending nationally on social media or food media right now
+2. Have NOT yet saturated the Minneapolis restaurant market
+3. Could plausibly be offered as meal prep or private chef format at home
+4. Would appeal to households willing to pay $65-85/person for a curated experience
+
+Return only terms with confidence >= 65. Be specific — "birria short rib" not "Mexican food".`,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object' as any,
+          properties: {
+            terms: {
+              type: 'array' as any,
+              items: {
+                type: 'object' as any,
+                properties: {
+                  term: { type: 'string' as any },
+                  confidence: { type: 'number' as any },
+                  rationale: { type: 'string' as any },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const raw = response.text ?? '';
+    let parsed: { terms?: { term: string; confidence: number; rationale: string }[] };
+    try { parsed = JSON.parse(raw); } catch { return; }
+
+    for (const item of (parsed.terms || [])) {
+      if (!item.term || (item.confidence ?? 0) < 65) continue;
+      await queueTerm(item.term, 'gemini-targeted', item.confidence, {
+        businessFitScore: Math.round(item.confidence),
+        businessFitRationale: item.rationale,
+      });
+    }
+  } catch (e) {
+    console.error('[discoverWithGemini]', e);
+  }
 }
 
 async function loadGA4BacktestPriors(): Promise<{ byKey: Map<string, GA4Prior>; all: GA4Prior[] }> {
@@ -294,7 +331,7 @@ async function discoverRisingQueries(seedTerms: string[], locationHint: string, 
 
 // --- Reddit enrichment (optional, not primary) ---
 async function discoverReddit(locationHints: string[]): Promise<string[]> {
-  const subs = (process.env.DISCOVERY_REDDIT_SUBS || 'food,foodporn,askculinary,recipes')
+  const subs = (process.env.DISCOVERY_REDDIT_SUBS || 'food,foodporn,askculinary,recipes,Minneapolis,TwinCities,minnesota')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
@@ -302,7 +339,8 @@ async function discoverReddit(locationHints: string[]): Promise<string[]> {
     'tried', 'best', 'opening', 'new', 'menu', 'brunch', 'dinner', 'lunch', 'dessert', 'ramen', 'thai', 'korean',
     'bbq', 'brewery', 'bar', 'café', 'cafe', 'diner', 'pho', 'boba', 'chicken', 'vegan', 'wings', 'steak',
     'tasting', 'popup', 'pop-up', 'food truck', 'ice cream', 'donut', 'bagel', 'sandwich', 'bowl', 'curry',
-    'happy hour', 'smash burger', 'birria', 'elote', 'ube', 'mochi', 'matcha'];
+    'happy hour', 'smash burger', 'birria', 'elote', 'ube', 'mochi', 'matcha',
+    'where to find', 'looking for', 'anyone know', 'near me', 'can i find', 'does anyone know', 'where can i get'];
   const titles: string[] = [];
 
   // Fetch hot + search for food in configured subs
@@ -450,12 +488,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const seedTerms = (tracked || []).map((t: any) => t.term);
     const ga4Priors = await loadGA4BacktestPriors();
 
-    // Run all discovery sources in parallel
+    // Load canonical map for term deduplication
+    const canonicalMap = supabase ? await loadCanonicalMap(supabase) : new Map();
+
+    // Run all discovery sources in parallel (Gemini targeted runs concurrently)
     const [yelpResult, risingQueries, redditTitles] = await Promise.all([
       discoverYelp(location.yelpLocation),
       discoverRisingQueries(seedTerms, location.queryHint, location.serpGeo),
       discoverReddit(location.locationHints),
     ]);
+
+    // Gemini targeted discovery (Module 6) — runs after other sources so we have seedTerms
+    // Fire-and-forget style: doesn't block the response
+    discoverWithGemini(seedTerms).catch(e => console.error('[discover] Gemini targeted error:', e));
 
     // NLP extract food terms from Reddit titles + Yelp business names
     const extractedTerms = await extractFoodTerms(redditTitles, yelpResult.businessNames, location.regionLabel);
@@ -519,7 +564,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           || yelpResult.terms.find(t => normalizeTermKey(t) === term)
           || fallbackDisplay;
         const triggerLabel = hasZip ? `Manual Zip ${zip}` : (isManual ? 'Manual' : 'Cron');
-        await queueTerm(displayTerm, `${sourceLabel} (${triggerLabel})`, finalScore);
+        // Resolve to canonical form before queuing to prevent duplicate tracking
+        const canonicalDisplay = resolveCanonical(displayTerm, canonicalMap);
+        await queueTerm(canonicalDisplay, `${sourceLabel} (${triggerLabel})`, finalScore);
         queued++;
       }
     }
