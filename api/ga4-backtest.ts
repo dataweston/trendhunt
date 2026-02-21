@@ -936,7 +936,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             limit: 20,
           });
           rawPaths = rows.map(r => ({ path: r.dimensionValues[0].value, views: r.metricValues[0].value }));
-        } catch (e: any) { rawPathsError = String(e.message || e); }
+        } catch (e: any) {
+          rawPathsError = e.response?.data ? JSON.stringify(e.response.data) : String(e.message || e);
+        }
 
         // Fetch top 20 page titles (no filters)
         try {
@@ -948,7 +950,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             limit: 20,
           });
           rawTitles = rows.map(r => ({ title: r.dimensionValues[0].value, views: r.metricValues[0].value }));
-        } catch (e: any) { rawTitlesError = String(e.message || e); }
+        } catch (e: any) {
+          rawTitlesError = e.response?.data ? JSON.stringify(e.response.data) : String(e.message || e);
+        }
       }
 
       return res.status(200).json({
