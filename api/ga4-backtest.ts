@@ -639,6 +639,97 @@ Return a JSON array of objects with "index" (1-based, matching the entry number)
   return keyToTerm;
 }
 
+function normalizeTermKey(term: string): string {
+  return term
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (size <= 0 || items.length === 0) return [items];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function persistBacktestResults(candidates: TrendAnalysis[]): Promise<void> {
+  if (!supabase || candidates.length === 0) return;
+
+  // Keep one row per normalized term, preferring the stronger score.
+  const byTerm = new Map<string, TrendAnalysis>();
+  for (const candidate of candidates) {
+    const key = normalizeTermKey(candidate.term);
+    if (!key) continue;
+    const existing = byTerm.get(key);
+    if (!existing || candidate.compositeScore > existing.compositeScore) {
+      byTerm.set(key, candidate);
+    }
+  }
+
+  const unique = [...byTerm.values()];
+  if (unique.length === 0) return;
+
+  const existingIds = new Map<string, string>();
+  const terms = unique.map((c) => c.term);
+
+  // Resolve existing rows by term so we can upsert on primary key `id`.
+  for (const termChunk of chunkArray(terms, 100)) {
+    try {
+      const { data, error } = await supabase
+        .from('ga4_backtest_results')
+        .select('id, term')
+        .in('term', termChunk);
+      if (error) {
+        console.error('GA4 backtest lookup error:', error);
+        continue;
+      }
+      for (const row of (data || []) as Array<{ id: string; term: string }>) {
+        const key = normalizeTermKey(row.term || '');
+        if (!key || existingIds.has(key)) continue;
+        existingIds.set(key, row.id);
+      }
+    } catch (e) {
+      console.error('GA4 backtest lookup failed:', e);
+    }
+  }
+
+  const payload = unique.map((candidate) => {
+    const key = normalizeTermKey(candidate.term);
+    const id = existingIds.get(key);
+    const row: Record<string, unknown> = {
+      term: candidate.term,
+      source: candidate.source,
+      raw_key: candidate.rawKey,
+      composite_score: candidate.compositeScore,
+      total_views: candidate.totalViews,
+      month_count: candidate.monthCount,
+      recent_monthly_avg: candidate.recentMonthlyAvg,
+      older_monthly_avg: candidate.olderMonthlyAvg,
+      growth_rate: candidate.growthRate,
+      linear_slope: candidate.linearSlope,
+      acceleration: candidate.acceleration,
+      seasonality_index: candidate.seasonalityIndex,
+      monthly_data: candidate.monthlyData,
+    };
+    if (id) row.id = id;
+    return row;
+  });
+
+  for (const rowChunk of chunkArray(payload, 200)) {
+    try {
+      const { error } = await supabase
+        .from('ga4_backtest_results')
+        .upsert(rowChunk, { onConflict: 'id' });
+      if (error) console.error('GA4 backtest persist error:', error);
+    } catch (e) {
+      console.error('GA4 backtest persist failed:', e);
+    }
+  }
+}
+
 // ========== MAIN LOGIC ==========
 
 async function discoverTerms(autoQueue: boolean): Promise<{
@@ -748,7 +839,10 @@ async function discoverTerms(autoQueue: boolean): Promise<{
   // 7. Sort by composite score descending
   analyses.sort((a, b) => b.compositeScore - a.compositeScore);
 
-  // 8. Filter against already-tracked terms
+  // 8. Persist analyzed terms as reusable GA4 priors for discover/trends.
+  await persistBacktestResults(analyses);
+
+  // 9. Filter against already-tracked terms
   let filtered = analyses;
   if (supabase) {
     const { data: tracked } = await supabase.from('trends').select('term');
@@ -756,7 +850,7 @@ async function discoverTerms(autoQueue: boolean): Promise<{
     filtered = analyses.filter(a => !trackedSet.has(a.term.toLowerCase()));
   }
 
-  // 9. Optionally auto-queue top candidates
+  // 10. Optionally auto-queue top candidates
   const queued: string[] = [];
   if (autoQueue && supabase) {
     // Queue top 20 candidates with positive composite score
