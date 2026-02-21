@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { TrendEntity, AnalysisResult } from '../types';
 import { analyzeTrendWithGemini } from '../services/geminiService';
-import { X, BrainCircuit, Loader2, FileText, Copy, Check, ExternalLink } from 'lucide-react';
+import { X, BrainCircuit, Loader2, FileText, Copy, Check } from 'lucide-react';
 import { TrendTimeSeries } from './Visualizations';
+import { getAdminHeaders } from '../services/adminAuth';
 
 interface PageDraft {
   title: string;
@@ -46,9 +47,12 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
     try {
       const res = await fetch('/api/generate-page', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ trendId: trend.id }),
       });
+      if (res.status === 401) {
+        throw new Error('Unauthorized');
+      }
       if (!res.ok) throw new Error(`API ${res.status}`);
       const data = await res.json();
       const d = data.draft;
@@ -63,7 +67,11 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
       });
     } catch (e) {
       console.error('Generate copy failed:', e);
-      setDraftError('Failed to generate copy. Make sure this term is tracked (not a search-only result).');
+      if (e instanceof Error && e.message === 'Unauthorized') {
+        setDraftError('Unauthorized. Save an admin token in Discovery Queue before generating copy.');
+      } else {
+        setDraftError('Failed to generate copy. Make sure this term is tracked (not a search-only result).');
+      }
     } finally {
       setDraftLoading(false);
     }
@@ -110,20 +118,47 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
           {/* Stats Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
-              <span className="text-sm text-slate-400 block mb-1">Unmet Demand</span>
-              <div className="text-3xl font-bold text-red-400">{trend.unmetDemandScore}</div>
+              <span className="text-sm text-slate-400 block mb-1">Intent</span>
+              <div className="text-3xl font-bold text-blue-400">{trend.intentScore ?? trend.demandScore}</div>
             </div>
             <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
-              <span className="text-sm text-slate-400 block mb-1">Supply Saturation</span>
-              <div className="text-3xl font-bold text-slate-200">{trend.supplyScore}%</div>
+              <span className="text-sm text-slate-400 block mb-1">Availability</span>
+              <div className="text-3xl font-bold text-slate-200">{trend.availabilityScore ?? trend.supplyScore}</div>
+            </div>
+            <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
+              <span className="text-sm text-slate-400 block mb-1">Realization</span>
+              <div className="text-3xl font-bold text-violet-300">{trend.realizationScore ?? 0}</div>
+            </div>
+            <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
+              <span className="text-sm text-slate-400 block mb-1">Gap</span>
+              <div className="text-3xl font-bold text-red-400">{trend.gapScore ?? trend.unmetDemandScore}</div>
+            </div>
+            <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
+              <span className="text-sm text-slate-400 block mb-1">Confidence</span>
+              <div className="text-3xl font-bold text-amber-300">{trend.confidenceScore ?? 0}</div>
             </div>
             <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
               <span className="text-sm text-slate-400 block mb-1">Breakout Prob.</span>
               <div className="text-3xl font-bold text-emerald-400">{trend.breakoutProbability}%</div>
             </div>
           </div>
+
+          {(trend.evidence?.length || trend.serpapiSignals?.length) ? (
+            <div className="bg-slate-800/30 rounded-lg border border-slate-700 p-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-2">Why This Is Flagged</h3>
+              <div className="text-xs text-slate-400 mb-2">
+                SerpAPI share: <span className="text-emerald-400 font-semibold">{trend.serpapiShare ?? 0}%</span>
+                {trend.zipCode ? ` · ZIP ${trend.zipCode}` : ''}
+              </div>
+              <ul className="space-y-1 text-sm text-slate-300">
+                {(trend.evidence || []).slice(0, 6).map((line, idx) => (
+                  <li key={idx}>- {line}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
 
           {/* All Signal Breakdown */}
           <div className="bg-slate-800/30 rounded-lg border border-slate-700 p-4">
@@ -134,13 +169,14 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                   GoogleSearch: 'Google Trends', Yelp: 'Yelp Supply', DoorDash: 'Delivery Search',
                   Reddit: 'Reddit', TikTok: 'TikTok', Pinterest: 'Pinterest',
                   OwnTraffic: 'Your GA4 Traffic', OwnSales: 'Your Square Sales',
+                  GA4Backtest: 'GA4 Backtest',
                   Wildchat: 'LLM Mentions', MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
                   YouTube: 'YouTube', GoogleNews: 'Google News', GoogleMaps: 'Google Maps Supply',
                 };
                 const colors: Record<string, string> = {
                   GoogleSearch: 'text-blue-400', Yelp: 'text-red-400', Reddit: 'text-orange-400',
                   TikTok: 'text-cyan-400', Pinterest: 'text-pink-400', OwnTraffic: 'text-violet-400',
-                  OwnSales: 'text-emerald-400', DoorDash: 'text-red-500', Wildchat: 'text-yellow-400',
+                  OwnSales: 'text-emerald-400', GA4Backtest: 'text-amber-400', DoorDash: 'text-red-500', Wildchat: 'text-yellow-400',
                   MetaAds: 'text-blue-500', YouTube: 'text-red-500', GoogleNews: 'text-blue-300',
                   GoogleMaps: 'text-green-400',
                 };

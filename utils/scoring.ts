@@ -5,6 +5,7 @@ const PLATFORM_WEIGHTS: Record<Platform, number> = {
   [Platform.TikTok]: 2.5,       // High viral potential (Demand)
   [Platform.YouTube]: 2.2,      // Video content traction (Demand)
   [Platform.OwnTraffic]: 1.8,   // Your own page views
+  [Platform.GA4Backtest]: 1.6,  // Historical GA4 growth patterns
   [Platform.Reddit]: 1.5,       // Community interest (Demand)
   [Platform.GoogleNews]: 1.4,   // Media coverage (Demand)
   [Platform.Pinterest]: 1.2,    // Visual interest / planning (Demand)
@@ -27,6 +28,7 @@ const DEMAND_PLATFORMS = new Set<Platform>([
   Platform.TikTok,
   Platform.YouTube,
   Platform.OwnTraffic,
+  Platform.GA4Backtest,
   Platform.Reddit,
   Platform.GoogleNews,
   Platform.Pinterest,

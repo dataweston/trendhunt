@@ -8,6 +8,14 @@ interface OpportunityTableProps {
 }
 
 export const OpportunityTable: React.FC<OpportunityTableProps> = ({ trends, onSelectTrend }) => {
+  const getMainSignal = (trend: TrendEntity): string => {
+    if (trend.signals.length === 0) return 'N/A';
+    const topSignal = trend.signals.reduce((best, current) =>
+      current.velocity > best.velocity ? current : best
+    );
+    return topSignal.platform;
+  };
+
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
       <div className="p-4 border-b border-slate-700 flex justify-between items-center">
@@ -22,14 +30,19 @@ export const OpportunityTable: React.FC<OpportunityTableProps> = ({ trends, onSe
             <tr>
               <th className="px-6 py-3">Term</th>
               <th className="px-6 py-3">Location</th>
-              <th className="px-6 py-3">Unmet Score</th>
+              <th className="px-6 py-3">Gap Score</th>
               <th className="px-6 py-3">Breakout Prob.</th>
+              <th className="px-6 py-3">Confidence</th>
+              <th className="px-6 py-3">SerpAPI</th>
               <th className="px-6 py-3">Main Signal</th>
               <th className="px-6 py-3">Action</th>
             </tr>
           </thead>
           <tbody>
-            {trends.map((trend) => (
+            {trends.map((trend) => {
+              const gap = trend.gapScore ?? trend.unmetDemandScore;
+              const confidence = trend.confidenceScore ?? 0;
+              return (
               <tr 
                 key={trend.id} 
                 className="border-b border-slate-700 hover:bg-slate-700/30 transition-colors cursor-pointer"
@@ -50,10 +63,10 @@ export const OpportunityTable: React.FC<OpportunityTableProps> = ({ trends, onSe
                     <div className="w-16 h-2 bg-slate-700 rounded-full overflow-hidden">
                       <div 
                         className="h-full bg-red-500" 
-                        style={{ width: `${trend.unmetDemandScore}%` }}
+                        style={{ width: `${gap}%` }}
                       ></div>
                     </div>
-                    <span className="text-red-400 font-bold">{trend.unmetDemandScore}</span>
+                    <span className="text-red-400 font-bold">{gap}</span>
                   </div>
                 </td>
                 <td className="px-6 py-4">
@@ -61,8 +74,10 @@ export const OpportunityTable: React.FC<OpportunityTableProps> = ({ trends, onSe
                     {trend.breakoutProbability}%
                   </span>
                 </td>
+                <td className="px-6 py-4 text-xs text-slate-300">{confidence}/100</td>
+                <td className="px-6 py-4 text-xs text-emerald-300">{trend.serpapiShare ?? 0}%</td>
                 <td className="px-6 py-4">
-                    {trend.signals.sort((a,b) => b.velocity - a.velocity)[0]?.platform || 'N/A'}
+                    {getMainSignal(trend)}
                 </td>
                 <td className="px-6 py-4">
                   <button className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1">
@@ -70,7 +85,8 @@ export const OpportunityTable: React.FC<OpportunityTableProps> = ({ trends, onSe
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -1,20 +1,70 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Trend Hunter
 
-# Run and deploy your AI Studio app
+Trend Hunter is a ZIP-first food trend intelligence dashboard. It discovers emerging terms, estimates unmet demand from intent vs. availability vs. realization, and helps operators move from detection to launch copy.
 
-This contains everything you need to run your app locally.
+## Agent Context
 
-View your app in AI Studio: https://ai.studio/apps/drive/1ko_FTz_7UU3y2FLnoOd7lO7pfMsoPfu0
+- Agent quick entry: `AGENTS.md`
+- Detailed executive vision and roadmap: `AGENT_EXECUTIVE_VISION.md`
 
-## Run Locally
+## Stack
 
-**Prerequisites:**  Node.js
+- Frontend: Vite + React + Tailwind
+- API: Vercel serverless functions in `api/`
+- Data: Supabase (`trends`, `trend_history`, `discovery_queue`, `page_drafts`, `serp_cache`)
+- External signals: SerpAPI, Reddit, optional GA4/Square/Meta
+- AI: Gemini (analysis + content generation)
 
+## Local Run
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Create `.env` with at least:
+   - `SUPABASE_URL`
+   - `SUPABASE_KEY`
+   - `SERPAPI_KEY`
+   - `GEMINI_API_KEY`
+   - `CRON_SECRET` (also used as admin token fallback)
+   - Optional location defaults:
+     - `DEFAULT_REGION_LABEL` (default: `United States`)
+     - `DEFAULT_QUERY_HINT` (used when no ZIP is provided)
+     - `DEFAULT_SERP_GEO` (default: `US`)
+3. Start app:
    `npm run dev`
+
+## Scripts
+
+- `npm run dev` - local dev server
+- `npm run build` - production build
+- `npm run preview` - preview build locally
+- `npm run typecheck` - TypeScript check for frontend + API
+
+## API Overview
+
+- `GET /api/trends` - fetch tracked trends (live signals, scoring)
+  - Supports `?q=<term>` and optional `&zip=<5-digit-zip>` for local gap scoring
+  - Returns component scores: intent, availability, realization, gap, confidence
+  - Includes SerpAPI contribution fields (`serpapiShare`, `serpapiSignals`)
+- `GET /api/discover` - SerpAPI-first discovery job (cron or authenticated manual run)
+  - Supports optional `&zip=<5-digit-zip>` for ZIP-scoped discovery
+  - Uses GA4 backtest priors to boost historically strong terms
+- `GET|POST /api/queue` - review/approve discovered terms (authenticated)
+- `POST /api/generate-page` - generate page draft for a tracked trend (authenticated)
+- `GET|POST /api/meta-ads` - read or create Meta campaign drafts (authenticated)
+- `GET /api/ga4-backtest` - mine historical GA4 terms and queue candidates (authenticated)
+
+## Admin Auth
+
+Sensitive endpoints require an admin token supplied via:
+- `Authorization: Bearer <token>`
+- or `x-admin-token: <token>`
+
+Token source on server:
+- `ADMIN_API_KEY` if present
+- otherwise `CRON_SECRET`
+
+Frontend admin actions use a token saved from the Discovery Queue panel (session storage).
+
+## Database
+
+Apply `supabase/schema.sql` before running ingestion and draft generation features.

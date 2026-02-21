@@ -1,96 +1,60 @@
-# Data Ingestion Transition Guide
+# Data Ingestion Guide (Current State)
 
-This guide outlines the steps to transition Trend Hunter from using mock data to ingesting real-time signals from Reddit, Google Trends, and Yelp.
+This project is no longer mock-data only. The ingestion path is already live:
 
-## 1. Architecture Overview
+`External Sources -> /api/trends + /api/discover -> Supabase -> React dashboard`
 
-**Current State:**
-`constants.ts` (Mock Data) -> `trendService.ts` -> `App.tsx`
+## What Runs Today
 
-**Target State:**
-`[Reddit/Google/Yelp APIs]` -> `Backend Proxy (Node.js)` -> `trendService.ts` -> `App.tsx`
+- `GET /api/trends`
+  - Enriches tracked terms from multiple sources
+  - Computes component scores: intent, availability, realization, gap, confidence
+  - Uses SerpAPI-backed local search/supply signals as the primary external source layer
+  - Accepts optional ZIP scoping (`/api/trends?zip=10001`)
+  - Persists snapshots to `trend_history` when request is authenticated
+- `GET /api/discover`
+  - SerpAPI-first discovery pipeline for new terms
+  - Optional ZIP scoping (`/api/discover?manual=true&zip=10001`)
+  - Triggered by Vercel cron daily and by authenticated manual scans
+  - Applies GA4 backtest priors when ranking queue candidates
+  - Queues candidates in `discovery_queue`
+- `GET|POST /api/queue`
+  - Review and approve/reject discovered terms
+- `POST /api/generate-page`
+  - Generates and stores product page drafts for tracked trends
+- `GET /api/ga4-backtest`
+  - Mines 3 years of GA4 history for keyword trend candidates
+  - Feeds an explicit GA4 backtest signal into live trend scoring
 
-## 2. Why a Backend Proxy?
+## Required Environment Variables
 
-Browser-based applications (like this Vite React app) cannot directly call many third-party APIs due to:
-1.  **CORS (Cross-Origin Resource Sharing):** Browsers block requests to domains that don't explicitly allow them.
-2.  **Secret Security:** Storing API keys (like Yelp Fusion API Key) in frontend code exposes them to the public.
-3.  **Library Limitations:** The `google-trends-api` library is designed for Node.js and does not work in the browser.
+Core:
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `SERPAPI_KEY`
+- `GEMINI_API_KEY`
+- `CRON_SECRET`
 
-## 3. Implementation Steps
+Recommended security:
+- `ADMIN_API_KEY` (if omitted, `CRON_SECRET` is used for admin auth fallback)
 
-### Phase A: Set up a Backend
-You need a server environment. Options:
-*   **Next.js API Routes:** If you migrate to Next.js.
-*   **Express.js Server:** A simple Node.js server.
-*   **Serverless Functions:** Vercel Functions, Netlify Functions, or AWS Lambda.
+Optional sources:
+- `SQUARE_ACCESS_TOKEN`
+- `GA4_PROPERTY_ID`
+- `GOOGLE_SERVICE_ACCOUNT_KEY`
+- `FACEBOOK_ACCESS_TOKEN`
+- `FACEBOOK_AD_ACCOUNT_ID`
+- `DEFAULT_REGION_LABEL` / `DEFAULT_QUERY_HINT` / `DEFAULT_SERP_GEO` (location defaults)
+- `DISCOVERY_REDDIT_SUBS` (comma-separated enrichment subreddits)
 
-**Example Express Server (`server.js`):**
-```javascript
-const express = require('express');
-const googleTrends = require('google-trends-api');
-const axios = require('axios');
-const app = express();
+## Cost / Reliability Controls
 
-// Endpoint to get trends
-app.get('/api/trends', async (req, res) => {
-  // 1. Fetch data from sources
-  // 2. Normalize data
-  // 3. Return JSON
-});
+- SerpAPI caching and budget guardrails are implemented in `lib/serp-governor.ts`
+- `TERM_PROCESS_CONCURRENCY` controls in-flight term enrichment concurrency
+- `MAX_TERMS_PER_REQUEST` caps how many tracked terms are enriched in one request
 
-app.listen(3000);
-```
+## Recommended Next Work
 
-### Phase B: Implement Connectors
-
-#### 1. Reddit Connector
-Reddit allows JSON access by appending `.json` to URLs.
-*   **Endpoint:** `https://www.reddit.com/r/[subreddit]/search.json?q=[term]&sort=new`
-*   **Data Extraction:** Parse `data.children[].data` for `title`, `score`, `num_comments`, `created_utc`.
-
-#### 2. Google Trends Connector
-Use the `google-trends-api` package in your backend.
-```javascript
-const googleTrends = require('google-trends-api');
-
-googleTrends.interestOverTime({ keyword: 'Birria Tacos' })
-  .then((results) => {
-    // Parse results
-  });
-```
-
-#### 3. Yelp Fusion Connector
-Requires an API Key.
-*   **Endpoint:** `https://api.yelp.com/v3/businesses/search`
-*   **Headers:** `Authorization: Bearer YOUR_API_KEY`
-*   **Query:** `term=Birria Tacos&location=Minneapolis`
-*   **Metric:** Count the number of results to estimate "Supply".
-
-### Phase C: Data Normalization
-In your backend, you must transform the raw API responses into the `TrendEntity` format expected by the frontend.
-
-**Mapping Logic:**
-*   **Velocity:** Calculate the slope of mentions over the last 7 days.
-*   **Intensity:** Normalize counts (e.g., 1000 upvotes = 100 intensity).
-
-### Phase D: Update Frontend Service
-Update `services/trendService.ts` to call your new backend.
-
-```typescript
-// services/trendService.ts
-export const trendService = {
-  getTrends: async (): Promise<TrendEntity[]> => {
-    const response = await fetch('/api/trends'); // Calls your backend
-    const data = await response.json();
-    // The backend should return data already in TrendEntity format
-    // OR you can map it here if the backend returns raw data
-    return data;
-  }
-};
-```
-
-## 4. Immediate Next Steps
-1.  Initialize a Node.js project for the backend (or add API routes if moving to a framework).
-2.  Get API Keys for Yelp Fusion and Reddit (optional, but recommended for higher rate limits).
-3.  Write a script to fetch data for *one* term (e.g., "Birria Tacos") and log the output to console to verify connectivity.
+1. Add automated tests for scoring and API contract behavior.
+2. Add monitoring/alerts on discovery failures and 5xx rates.
+3. Tune source-specific scaling constants using real historical outcomes.

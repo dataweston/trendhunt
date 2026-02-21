@@ -3,17 +3,20 @@
  * Finds new food trend terms in a geographic area.
  * 
  * Trigger methods:
- *   - Vercel cron (daily at 6am) — uses default region
- *   - Manual: GET /api/discover?manual=true&zip=55113
+ *   - Vercel cron (daily at 6am): uses configured default region
+ *   - Manual: GET /api/discover?manual=true&zip=10001 (admin token required)
  * 
- * Sources: Yelp businesses + categories, SerpAPI rising queries, Reddit local subs.
- * Uses Gemini to extract clean food terms from raw titles.
+ * Sources: SerpAPI Yelp + Google Trends as primary, plus Reddit enrichment.
+ * GA4 backtest priors boost ranking for historically strong terms.
+ * Gemini extracts clean food terms from raw text.
  */
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
 import { serpSearch } from '../lib/serp-governor.js';
+import { requireAdminAuth } from '../lib/api-auth.js';
+import { getLocationContext } from '../lib/location.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -53,6 +56,14 @@ function isGenericTerm(term: string): boolean {
   return false;
 }
 
+function normalizeTermKey(term: string): string {
+  return term
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function queueTerm(term: string, source: string, score: number) {
   if (!supabase || !term || term.length < 3 || term.length > 80) return;
   const normalized = term.trim().replace(/\s+/g, ' ');
@@ -66,6 +77,35 @@ async function queueTerm(term: string, source: string, score: number) {
   const { data: queued } = await supabase.from('discovery_queue').select('id').ilike('term', normalized).maybeSingle();
   if (queued) return;
   await supabase.from('discovery_queue').insert({ term: normalized, source, initial_score: Math.round(score), status: 'pending' });
+}
+
+async function loadGA4BacktestPriors(): Promise<Map<string, { compositeScore: number; growthRate: number }>> {
+  const prior = new Map<string, { compositeScore: number; growthRate: number }>();
+  if (!supabase) return prior;
+
+  try {
+    const { data, error } = await supabase
+      .from('ga4_backtest_results')
+      .select('term, composite_score, growth_rate')
+      .order('composite_score', { ascending: false })
+      .limit(500);
+
+    if (error || !data) return prior;
+    for (const row of data as any[]) {
+      const key = normalizeTermKey(String(row.term || ''));
+      if (!key) continue;
+      const compositeScore = Number(row.composite_score || 0);
+      const growthRate = Number(row.growth_rate || 0);
+      const existing = prior.get(key);
+      if (!existing || compositeScore > existing.compositeScore) {
+        prior.set(key, { compositeScore, growthRate });
+      }
+    }
+  } catch (error) {
+    console.error('GA4 prior load failed:', error);
+  }
+
+  return prior;
 }
 
 // --- Yelp via SerpAPI: popular + trending businesses in location ---
@@ -125,13 +165,19 @@ async function discoverYelp(location: string): Promise<{ terms: string[]; busine
 }
 
 // --- SerpAPI Rising Queries ---
-async function discoverRisingQueries(seedTerms: string[]) {
+async function discoverRisingQueries(seedTerms: string[], locationHint: string, geo = 'US') {
   const results: { term: string; score: number }[] = [];
   // Use seed terms + generic food seeds
   const seeds = seedTerms.length > 0 ? seedTerms.slice(0, 2) : ['food near me', 'best restaurants'];
   for (const seed of seeds) {
     try {
-      const result = await serpSearch({ engine: 'google_trends', q: seed, data_type: 'RELATED_QUERIES' });
+      const localizedSeed = `${seed} ${locationHint}`.trim();
+      const result = await serpSearch({
+        engine: 'google_trends',
+        q: localizedSeed,
+        data_type: 'RELATED_QUERIES',
+        geo,
+      });
       if (!result.data) continue;
       const rising = result.data?.related_queries?.rising || [];
       for (const q of rising) {
@@ -144,9 +190,12 @@ async function discoverRisingQueries(seedTerms: string[]) {
   return results;
 }
 
-// --- Reddit Local Subs ---
-async function discoverReddit(): Promise<string[]> {
-  const subs = ['Minneapolis', 'TwinCities', 'minnesota', 'MSPFood', 'MinneapolisFood'];
+// --- Reddit enrichment (optional, not primary) ---
+async function discoverReddit(locationHints: string[]): Promise<string[]> {
+  const subs = (process.env.DISCOVERY_REDDIT_SUBS || 'food,foodporn,askculinary,recipes')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const keywords = ['food', 'eat', 'restaurant', 'drink', 'coffee', 'pizza', 'taco', 'burger', 'sushi', 'bakery',
     'tried', 'best', 'opening', 'new', 'menu', 'brunch', 'dinner', 'lunch', 'dessert', 'ramen', 'thai', 'korean',
     'bbq', 'brewery', 'bar', 'café', 'cafe', 'diner', 'pho', 'boba', 'chicken', 'vegan', 'wings', 'steak',
@@ -154,14 +203,17 @@ async function discoverReddit(): Promise<string[]> {
     'happy hour', 'smash burger', 'birria', 'elote', 'ube', 'mochi', 'matcha'];
   const titles: string[] = [];
 
-  // Fetch hot + search for food in local subs
+  // Fetch hot + search for food in configured subs
   const fetches: { url: string; sub: string }[] = [];
   for (const sub of subs) {
     fetches.push({ url: `https://www.reddit.com/r/${sub}/hot.json?limit=50`, sub });
     fetches.push({ url: `https://www.reddit.com/r/${sub}/search.json?q=food+OR+restaurant+OR+new+opening&restrict_sr=on&sort=new&limit=25`, sub });
   }
-  // Also hit broader food subs with Minneapolis filter
-  fetches.push({ url: `https://www.reddit.com/r/foodie/search.json?q=minneapolis+OR+twin+cities&sort=new&limit=15`, sub: 'foodie' });
+  fetches.push({ url: 'https://www.reddit.com/r/foodie/hot.json?limit=25', sub: 'foodie' });
+  for (const hint of locationHints.slice(0, 3)) {
+    const query = encodeURIComponent(`"${hint}" (food OR restaurant OR brunch OR "new opening")`);
+    fetches.push({ url: `https://www.reddit.com/search.json?q=${query}&sort=new&limit=25`, sub: 'global' });
+  }
 
   for (const { url, sub } of fetches) {
     try {
@@ -185,7 +237,7 @@ async function discoverReddit(): Promise<string[]> {
 }
 
 // --- Gemini NLP: extract food terms from raw titles + business names ---
-async function extractFoodTerms(rawTitles: string[], businessNames: string[]): Promise<string[]> {
+async function extractFoodTerms(rawTitles: string[], businessNames: string[], locationLabel: string): Promise<string[]> {
   const combined = [
     ...rawTitles.map((t) => `Reddit: ${t}`),
     ...businessNames.slice(0, 20).map((n) => `Restaurant: ${n}`),
@@ -196,7 +248,7 @@ async function extractFoodTerms(rawTitles: string[], businessNames: string[]): P
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `You are a food trend analyst for the Minneapolis–St Paul metro area. Your job is to identify EMERGING food trends — specific dishes, preparations, or food concepts that are NEW, GROWING, or BREAKING OUT.
+        contents: `You are a food trend analyst for ${locationLabel}. Your job is to identify emerging food trends: specific dishes, preparations, or food concepts that are new, growing, or breaking out.
 
 Critical rules:
 - REJECT generic categories that have always existed ("burgers", "pizza", "sushi", "noodles", "thai food", etc.)
@@ -277,48 +329,46 @@ function extractFoodTermsKeyword(titles: string[], businessNames: string[]): str
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-admin-token,authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Auth: Vercel cron secret or manual trigger
-  const cronSecret = req.headers['authorization'];
-  const isVercelCron = cronSecret === `Bearer ${process.env.CRON_SECRET}`;
   const isManual = req.query.manual === 'true';
-  if (!isVercelCron && !isManual) {
-    return res.status(401).json({ error: 'Unauthorized. Use ?manual=true or cron secret.' });
-  }
+  if (!requireAdminAuth(req, res, { allowCron: !isManual })) return;
 
   if (!supabase) return res.status(500).json({ error: 'Supabase not configured' });
 
   try {
     // Determine location — use zip code if provided, else default
     const zip = typeof req.query.zip === 'string' ? req.query.zip.trim() : '';
-    const location = zip.length === 5 ? zip : 'Minneapolis-St Paul, MN';
+    const location = getLocationContext(zip);
+    const hasZip = location.hasZip;
 
     // Get current tracked terms for seed queries
     const { data: tracked } = await supabase.from('trends').select('term');
     const seedTerms = (tracked || []).map((t: any) => t.term);
+    const ga4Priors = await loadGA4BacktestPriors();
 
     // Run all discovery sources in parallel
     const [yelpResult, risingQueries, redditTitles] = await Promise.all([
-      discoverYelp(location),
-      discoverRisingQueries(seedTerms),
-      discoverReddit(),
+      discoverYelp(location.yelpLocation),
+      discoverRisingQueries(seedTerms, location.queryHint, location.serpGeo),
+      discoverReddit(location.locationHints),
     ]);
 
     // NLP extract food terms from Reddit titles + Yelp business names
-    const extractedTerms = await extractFoodTerms(redditTitles, yelpResult.businessNames);
+    const extractedTerms = await extractFoodTerms(redditTitles, yelpResult.businessNames, location.regionLabel);
 
-    // Queue with cross-source scoring: terms found in multiple sources score higher
-    // Track how many sources mentioned each term
-    const termSources = new Map<string, { sources: Set<string>; bestScore: number }>();
-    
+    // Queue with cross-source scoring: SerpAPI-backed terms are primary, GA4 priors boost.
+    const termSources = new Map<string, { sources: Set<string>; bestScore: number; hasSerpapi: boolean }>();
+    const SERPAPI_SOURCES = new Set(['yelp', 'rising']);
+
     const trackTerm = (term: string, source: string, score: number) => {
       if (isGenericTerm(term)) return;
-      const key = term.toLowerCase().trim();
-      const existing = termSources.get(key) || { sources: new Set(), bestScore: 0 };
+      const key = normalizeTermKey(term);
+      const existing = termSources.get(key) || { sources: new Set(), bestScore: 0, hasSerpapi: false };
       existing.sources.add(source);
       existing.bestScore = Math.max(existing.bestScore, score);
+      if (SERPAPI_SOURCES.has(source)) existing.hasSerpapi = true;
       termSources.set(key, existing);
     };
 
@@ -333,29 +383,46 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       trackTerm(term, 'nlp', 40);
     }
 
-    // Score: base score + bonus for multi-source corroboration
+    // Score = base + corroboration + SerpAPI signal + GA4 prior bonus.
     let queued = 0;
+    let ga4Boosted = 0;
     for (const [term, info] of termSources) {
       const sourceCount = info.sources.size;
-      // Multi-source bonus: 2 sources = +20, 3+ = +40
       const multiSourceBonus = sourceCount >= 3 ? 40 : sourceCount >= 2 ? 20 : 0;
-      const finalScore = Math.min(100, info.bestScore + multiSourceBonus);
-      const sourceLabel = [...info.sources].join('+');
-      // Prefer multi-source terms; single-source terms need high base score (>= 60)
-      if (sourceCount >= 2 || info.bestScore >= 60) {
+      const serpapiBonus = info.hasSerpapi ? 12 : 0;
+      const ga4Prior = ga4Priors.get(term);
+      const ga4Bonus = ga4Prior
+        ? Math.min(
+            25,
+            Math.round(ga4Prior.compositeScore * 0.15) + Math.max(0, Math.min(10, Math.round(ga4Prior.growthRate / 25)))
+          )
+        : 0;
+      if (ga4Bonus > 0) ga4Boosted++;
+
+      const finalScore = Math.min(100, info.bestScore + multiSourceBonus + serpapiBonus + ga4Bonus);
+      const sourceLabel = [...info.sources, ...(ga4Bonus > 0 ? ['ga4-prior'] : [])].join('+');
+      const hasPrimaryEvidence = info.hasSerpapi || ga4Bonus >= 18;
+      const clearsEvidenceBar = sourceCount >= 2 || info.bestScore >= 60 || ga4Bonus >= 18;
+
+      if (hasPrimaryEvidence && clearsEvidenceBar) {
         // Use original casing from extracted terms if available
-        const displayTerm = extractedTerms.find(t => t.toLowerCase() === term) 
-          || risingQueries.find(rq => rq.term.toLowerCase() === term)?.term 
-          || yelpResult.terms.find(t => t.toLowerCase() === term) 
-          || term;
-        await queueTerm(displayTerm, `${sourceLabel} (${sourceLabel.includes('zip') ? `Zip ${zip}` : 'Cron'})`, finalScore);
+        const fallbackDisplay = term
+          .split(/\s+/)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ');
+        const displayTerm = extractedTerms.find(t => normalizeTermKey(t) === term)
+          || risingQueries.find(rq => normalizeTermKey(rq.term) === term)?.term
+          || yelpResult.terms.find(t => normalizeTermKey(t) === term)
+          || fallbackDisplay;
+        const triggerLabel = hasZip ? `Manual Zip ${zip}` : (isManual ? 'Manual' : 'Cron');
+        await queueTerm(displayTerm, `${sourceLabel} (${triggerLabel})`, finalScore);
         queued++;
       }
     }
 
     res.status(200).json({
       ok: true,
-      location,
+      location: location.regionLabel,
       processed: queued,
       sources: {
         yelp_categories: yelpResult.terms.length,
@@ -363,10 +430,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         rising: risingQueries.length,
         reddit_titles: redditTitles.length,
         nlp_extracted: extractedTerms.length,
+        ga4_prior_terms: ga4Priors.size,
+        ga4_boosted_candidates: ga4Boosted,
       },
       debug: {
         gemini_available: !!ai,
         yelp_via_serpapi: true,
+        serpapi_primary: true,
+        serp_geo: location.serpGeo,
+        zip_scoped: hasZip,
         extracted_terms: extractedTerms.slice(0, 10),
         sample_reddit: redditTitles.slice(0, 3),
       },

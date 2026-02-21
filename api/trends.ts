@@ -1,7 +1,9 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
-import { serpSearch } from '../lib/serp-governor.js';
+import { serpSearch, getUsageStats } from '../lib/serp-governor.js';
+import { isAdminRequest } from '../lib/api-auth.js';
+import { getLocationContext, type LocationContext } from '../lib/location.js';
 
 // --- Types (standalone for serverless) ---
 enum Platform {
@@ -15,6 +17,7 @@ enum Platform {
   Wildchat = 'Wildchat',
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
+  GA4Backtest = 'GA4Backtest',
   MetaAds = 'MetaAds',
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
@@ -34,7 +37,16 @@ interface TrendEntity {
   category: string;
   region: string;
   neighborhood: string;
+  zipCode?: string;
   signals: SignalData[];
+  intentScore: number;
+  availabilityScore: number;
+  realizationScore: number;
+  gapScore: number;
+  confidenceScore: number;
+  serpapiShare: number;
+  serpapiSignals: string[];
+  evidence: string[];
   supplyScore: number;
   demandScore: number;
   unmetDemandScore: number;
@@ -43,14 +55,13 @@ interface TrendEntity {
 }
 
 // --- Config ---
-const REGION = 'Minneapolis-St Paul, MN';
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN;
 const GA4_PROPERTY_ID = process.env.GA4_PROPERTY_ID;
 const EXTERNAL_TIMEOUT_MS = Number(process.env.EXTERNAL_TIMEOUT_MS || 5000);
 const TERM_PROCESS_CONCURRENCY = Number(process.env.TERM_PROCESS_CONCURRENCY || 3);
+const MAX_TERMS_PER_REQUEST = Number(process.env.MAX_TERMS_PER_REQUEST || 25);
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -87,37 +98,179 @@ async function mapWithConcurrency<T, R>(
 }
 
 // --- Scoring ---
+interface ScoreComponents {
+  intentScore: number;
+  availabilityScore: number;
+  realizationScore: number;
+  gapScore: number;
+  confidenceScore: number;
+  serpapiShare: number;
+  serpapiSignals: string[];
+  evidence: string[];
+}
+
 const WEIGHTS: Record<string, number> = {
-  OwnSales: 3.0, TikTok: 2.5, YouTube: 2.2, OwnTraffic: 1.8, Reddit: 1.5,
-  GoogleNews: 1.4, Pinterest: 1.2, GoogleSearch: 1.0, MetaAds: 0.8, Wildchat: 0.6,
-  Yelp: 0.5, DoorDash: 0.5, GoogleMaps: 0.5, RedditPushshift: 0.3,
+  OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 1.7,
+  GoogleSearch: 2.8, DoorDash: 1.3, Reddit: 1.0,
+  TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
+  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, Wildchat: 0.4, RedditPushshift: 0.3,
 };
-const SUPPLY = new Set(['Yelp', 'GoogleMaps']);
+const SUPPLY = new Set<Platform>([Platform.Yelp, Platform.GoogleMaps]);
+const SERPAPI_PLATFORMS = new Set<Platform>([
+  Platform.GoogleSearch,
+  Platform.DoorDash,
+  Platform.Yelp,
+  Platform.TikTok,
+  Platform.YouTube,
+  Platform.GoogleNews,
+  Platform.GoogleMaps,
+]);
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function signalByPlatform(signals: SignalData[]): Map<Platform, SignalData> {
+  const map = new Map<Platform, SignalData>();
+  for (const signal of signals) map.set(signal.platform, signal);
+  return map;
+}
 
 const demandScore = (signals: SignalData[]): number => {
-  let tw = 0, tws = 0;
-  for (const s of signals) {
-    if (SUPPLY.has(s.platform)) continue;
-    // Skip platforms that returned nothing — don't let unconfigured sources drag the average down
-    if (s.currentIntensity === 0 && s.velocity === 0) continue;
-    const w = WEIGHTS[s.platform] || 1;
-    tws += s.currentIntensity * w; tw += w;
+  let weighted = 0;
+  let weightTotal = 0;
+  for (const signal of signals) {
+    if (SUPPLY.has(signal.platform)) continue;
+    if (signal.currentIntensity === 0 && signal.velocity === 0) continue;
+    const weight = WEIGHTS[signal.platform] || 1;
+    weighted += signal.currentIntensity * weight;
+    weightTotal += weight;
   }
-  return tw === 0 ? 0 : Math.min(100, Math.round(tws / tw));
+  return clampScore(weightTotal > 0 ? weighted / weightTotal : 0);
 };
 
 const supplyScore = (signals: SignalData[]): number => {
-  const ss = signals.filter(s => SUPPLY.has(s.platform) && s.currentIntensity > 0);
-  if (!ss.length) return 5;
-  return Math.min(100, Math.round(ss.reduce((a, s) => a + s.currentIntensity, 0) / ss.length));
+  const supplySignals = signals.filter((s) => SUPPLY.has(s.platform));
+  if (supplySignals.length === 0) return 5;
+  const yelp = supplySignals.find((s) => s.platform === Platform.Yelp)?.currentIntensity || 0;
+  const maps = supplySignals.find((s) => s.platform === Platform.GoogleMaps)?.currentIntensity || 0;
+  const weighted = maps * 0.6 + yelp * 0.4;
+  return clampScore(weighted || 5);
 };
 
-const unmetDemand = (d: number, s: number) => Math.max(0, Math.min(100, Math.round(d - s * 0.6)));
+const calculateRealizationScore = (signals: SignalData[]): number => {
+  const byPlatform = signalByPlatform(signals);
+  const sales = byPlatform.get(Platform.OwnSales)?.currentIntensity || 0;
+  const traffic = byPlatform.get(Platform.OwnTraffic)?.currentIntensity || 0;
+  const availability = supplyScore(signals);
+  const base = sales > 0
+    ? sales * 0.75 + traffic * 0.2 + availability * 0.05
+    : traffic * 0.35 + availability * 0.1;
+  return clampScore(base);
+};
 
-const breakoutProb = (signals: SignalData[]): number => {
-  let wv = 0, tw = 0;
-  for (const s of signals) { const w = WEIGHTS[s.platform] || 1; wv += s.velocity * w; tw += w; }
-  return Math.max(0, Math.min(100, Math.round(20 + (tw > 0 ? wv / tw : 0) * 4)));
+const unmetDemand = (demand: number, availability: number, realization = 0) => {
+  const conversionDeficit = Math.max(0, demand - realization);
+  const availabilityFriction = Math.max(0, 100 - availability);
+  const combined = conversionDeficit * 0.6 + ((demand * availabilityFriction) / 100) * 0.4;
+  return clampScore(combined);
+};
+
+const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): number => {
+  const activeSignals = signals.filter((s) => s.currentIntensity > 0 || s.velocity !== 0);
+  const activeSerpSignals = activeSignals.filter((s) => SERPAPI_PLATFORMS.has(s.platform));
+  const hasSales = activeSignals.some((s) => s.platform === Platform.OwnSales);
+  const hasTraffic = activeSignals.some((s) => s.platform === Platform.OwnTraffic);
+  const hasBacktest = activeSignals.some((s) => s.platform === Platform.GA4Backtest);
+
+  let score = 20;
+  score += activeSignals.length * 4;
+  score += activeSerpSignals.length * 7;
+  if (hasSales) score += 15;
+  if (hasTraffic) score += 8;
+  if (hasBacktest) score += 10;
+  if (hasZip) score += 5;
+  return clampScore(score);
+};
+
+const calculateSerpapiShare = (signals: SignalData[]): number => {
+  const activeSignals = signals.filter((s) => s.currentIntensity > 0);
+  const total = activeSignals.reduce((acc, s) => acc + s.currentIntensity, 0);
+  if (total === 0) return 0;
+  const serp = activeSignals
+    .filter((s) => SERPAPI_PLATFORMS.has(s.platform))
+    .reduce((acc, s) => acc + s.currentIntensity, 0);
+  return clampScore((serp / total) * 100);
+};
+
+const buildEvidence = (
+  signals: SignalData[],
+  scores: Omit<ScoreComponents, 'evidence' | 'serpapiSignals'>
+): string[] => {
+  const evidence: string[] = [];
+  const byPlatform = signalByPlatform(signals);
+  const google = byPlatform.get(Platform.GoogleSearch)?.currentIntensity || 0;
+  const sales = byPlatform.get(Platform.OwnSales)?.currentIntensity || 0;
+  const yelp = byPlatform.get(Platform.Yelp)?.currentIntensity || 0;
+  const maps = byPlatform.get(Platform.GoogleMaps)?.currentIntensity || 0;
+  const backtest = byPlatform.get(Platform.GA4Backtest)?.currentIntensity || 0;
+
+  evidence.push(`Intent ${scores.intentScore}/100 from search and cross-platform demand signals.`);
+  evidence.push(`Availability ${scores.availabilityScore}/100 from SerpAPI Yelp+Maps local supply.`);
+  evidence.push(`Realization ${scores.realizationScore}/100 from owned sales/traffic signals.`);
+  evidence.push(`Gap ${scores.gapScore}/100 indicates unserved demand in current local supply.`);
+
+  if (google > 0) evidence.push(`Google Trends local interest signal: ${google}/100.`);
+  if (yelp > 0 || maps > 0) evidence.push(`Local listings density (Yelp ${yelp}, Maps ${maps}).`);
+  if (sales > 0) evidence.push(`Observed in-store/online sales proxy present (${sales}/100).`);
+  if (backtest > 0) evidence.push(`GA4 backtest history reinforces term momentum (${backtest}/100).`);
+  if (scores.serpapiShare > 0) evidence.push(`SerpAPI contributes ${scores.serpapiShare}% of active signal intensity.`);
+
+  return evidence;
+};
+
+const scoreTrend = (signals: SignalData[], hasZip: boolean): ScoreComponents => {
+  const intentScore = demandScore(signals);
+  const availabilityScore = supplyScore(signals);
+  const realizationScore = calculateRealizationScore(signals);
+  const gapScore = unmetDemand(intentScore, availabilityScore, realizationScore);
+  const confidenceScore = calculateConfidenceScore(signals, hasZip);
+  const serpapiShare = calculateSerpapiShare(signals);
+  const serpapiSignals = signals
+    .filter((s) => SERPAPI_PLATFORMS.has(s.platform) && s.currentIntensity > 0)
+    .map((s) => s.platform);
+  const evidence = buildEvidence(signals, {
+    intentScore,
+    availabilityScore,
+    realizationScore,
+    gapScore,
+    confidenceScore,
+    serpapiShare,
+  });
+
+  return {
+    intentScore,
+    availabilityScore,
+    realizationScore,
+    gapScore,
+    confidenceScore,
+    serpapiShare,
+    serpapiSignals,
+    evidence,
+  };
+};
+
+const breakoutProb = (signals: SignalData[], components: ScoreComponents): number => {
+  let weightedVelocity = 0;
+  let totalWeight = 0;
+  for (const signal of signals) {
+    const weight = WEIGHTS[signal.platform] || 1;
+    weightedVelocity += signal.velocity * weight;
+    totalWeight += weight;
+  }
+  const velocityScore = totalWeight > 0 ? (weightedVelocity / totalWeight) * 3 : 0;
+  const base = 15 + components.gapScore * 0.45 + components.intentScore * 0.2 + velocityScore + components.confidenceScore * 0.15;
+  return clampScore(base);
 };
 
 const predictBreakout = (hist: { week: number; score: number }[], cur: number, thr = 80): number => {
@@ -137,10 +290,11 @@ const predictBreakout = (hist: { week: number; score: number }[], cur: number, t
 
 // ========== FETCHERS ==========
 
-async function fetchSerpTrends(term: string): Promise<SignalData> {
+async function fetchSerpTrends(term: string, context: LocationContext): Promise<SignalData> {
   const empty: SignalData = { platform: Platform.GoogleSearch, currentIntensity: 0, velocity: 0, history: [] };
   try {
-    const result = await serpSearch({ engine: 'google_trends', q: term, geo: 'US-MN', data_type: 'TIMESERIES' });
+    const localizedQuery = context.hasZip ? `${term} ${context.queryHint}` : term;
+    const result = await serpSearch({ engine: 'google_trends', q: localizedQuery, geo: context.serpGeo, data_type: 'TIMESERIES' });
     if (!result.data) return empty;
     const tl = result.data?.interest_over_time?.timeline_data;
     if (!tl?.length) return empty;
@@ -156,10 +310,11 @@ async function fetchSerpTrends(term: string): Promise<SignalData> {
   } catch { return empty; }
 }
 
-async function fetchSerpDelivery(term: string): Promise<SignalData> {
+async function fetchSerpDelivery(term: string, context: LocationContext): Promise<SignalData> {
   const empty: SignalData = { platform: Platform.DoorDash, currentIntensity: 0, velocity: 0, history: [] };
   try {
-    const result = await serpSearch({ engine: 'google_trends', q: `${term} delivery`, geo: 'US-MN', data_type: 'TIMESERIES' });
+    const localizedQuery = context.hasZip ? `${term} delivery ${context.queryHint}` : `${term} delivery`;
+    const result = await serpSearch({ engine: 'google_trends', q: localizedQuery, geo: context.serpGeo, data_type: 'TIMESERIES' });
     if (!result.data) return empty;
     const tl = result.data?.interest_over_time?.timeline_data;
     if (!tl?.length) return empty;
@@ -173,10 +328,10 @@ async function fetchSerpDelivery(term: string): Promise<SignalData> {
   } catch { return empty; }
 }
 
-async function fetchYelp(term: string): Promise<SignalData> {
+async function fetchYelp(term: string, context: LocationContext): Promise<SignalData> {
   // Use SerpAPI's yelp engine instead of direct Yelp API (no Yelp key needed)
   try {
-    const result = await serpSearch({ engine: 'yelp', find_desc: term, find_loc: REGION });
+    const result = await serpSearch({ engine: 'yelp', find_desc: term, find_loc: context.yelpLocation });
     if (!result.data) return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] };
     const results = result.data.organic_results || [];
     // Only count results that specifically mention the term (not just generic restaurants)
@@ -199,10 +354,13 @@ async function fetchYelp(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.Yelp, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchReddit(term: string): Promise<SignalData> {
+async function fetchReddit(term: string, context: LocationContext): Promise<SignalData> {
   try {
+    const localizedQuery = context.hasZip
+      ? `${term} ${context.queryHint} (food OR restaurant OR menu OR near me)`
+      : term;
     const { data } = await axios.get('https://www.reddit.com/search.json', {
-      params: { q: term, sort: 'new', limit: 25 },
+      params: { q: localizedQuery, sort: 'new', limit: 25 },
       timeout: EXTERNAL_TIMEOUT_MS,
     });
     const posts = data.data.children;
@@ -212,10 +370,13 @@ async function fetchReddit(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.Reddit, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchTikTokSerp(term: string): Promise<SignalData> {
+async function fetchTikTokSerp(term: string, context: LocationContext): Promise<SignalData> {
   // Use SerpAPI Google search with site:tiktok.com for much better coverage than Reddit proxy
   try {
-    const result = await serpSearch({ engine: 'google', q: `${term} food site:tiktok.com`, num: '50' });
+    const localizedQuery = context.hasZip
+      ? `${term} food ${context.queryHint} site:tiktok.com`
+      : `${term} food site:tiktok.com`;
+    const result = await serpSearch({ engine: 'google', q: localizedQuery, num: '50' });
     if (!result.data) return { platform: Platform.TikTok, currentIntensity: 0, velocity: 0, history: [] };
     const organic = result.data.organic_results || [];
     // Count results and check for recency signals in snippets
@@ -246,10 +407,13 @@ async function fetchPinterestProxy(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.Pinterest, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchYouTube(term: string): Promise<SignalData> {
+async function fetchYouTube(term: string, context: LocationContext): Promise<SignalData> {
   // SerpAPI YouTube search - high signal for food trends
   try {
-    const result = await serpSearch({ engine: 'youtube', search_query: `${term} recipe food` });
+    const localizedQuery = context.hasZip
+      ? `${term} recipe food ${context.queryHint}`
+      : `${term} recipe food`;
+    const result = await serpSearch({ engine: 'youtube', search_query: localizedQuery });
     if (!result.data) return { platform: Platform.YouTube, currentIntensity: 0, velocity: 0, history: [] };
     const videos = result.data.video_results || [];
     let totalViews = 0;
@@ -279,10 +443,13 @@ async function fetchYouTube(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.YouTube, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchGoogleNews(term: string): Promise<SignalData> {
+async function fetchGoogleNews(term: string, context: LocationContext): Promise<SignalData> {
   // SerpAPI Google News - media coverage indicates mainstream attention
   try {
-    const result = await serpSearch({ engine: 'google_news', q: `${term} food restaurant` });
+    const localizedQuery = context.hasZip
+      ? `${term} food restaurant ${context.queryHint}`
+      : `${term} food restaurant`;
+    const result = await serpSearch({ engine: 'google_news', q: localizedQuery });
     if (!result.data) return { platform: Platform.GoogleNews, currentIntensity: 0, velocity: 0, history: [] };
     const articles = result.data.news_results || [];
     let recentCount = 0;
@@ -299,10 +466,11 @@ async function fetchGoogleNews(term: string): Promise<SignalData> {
   } catch { return { platform: Platform.GoogleNews, currentIntensity: 0, velocity: 0, history: [] }; }
 }
 
-async function fetchGoogleMaps(term: string): Promise<SignalData> {
+async function fetchGoogleMaps(term: string, context: LocationContext): Promise<SignalData> {
   // SerpAPI Google Maps - local supply density (how many places serve this)
   try {
-    const result = await serpSearch({ engine: 'google_maps', q: `${term} ${REGION}`, type: 'search' });
+    const locationQuery = context.hasZip ? `${term} ${context.queryHint}` : `${term} ${context.regionLabel}`;
+    const result = await serpSearch({ engine: 'google_maps', q: locationQuery, type: 'search' });
     if (!result.data) return { platform: Platform.GoogleMaps, currentIntensity: 0, velocity: 0, history: [] };
     const places = result.data.local_results || [];
     // Only count places that specifically reference the term
@@ -487,6 +655,32 @@ async function fetchGA4Traffic(term: string): Promise<SignalData> {
   } catch (e) { console.error('GA4 fetch error:', e); return empty; }
 }
 
+async function fetchGA4BacktestSignal(term: string): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.GA4Backtest, currentIntensity: 0, velocity: 0, history: [] };
+  if (!supabase) return empty;
+  try {
+    const { data, error } = await supabase
+      .from('ga4_backtest_results')
+      .select('composite_score, growth_rate')
+      .ilike('term', term)
+      .order('composite_score', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return empty;
+
+    const intensity = clampScore(Number(data.composite_score || 0));
+    const velocity = Math.max(-20, Math.min(20, Math.round(Number(data.growth_rate || 0) / 10)));
+    return {
+      platform: Platform.GA4Backtest,
+      currentIntensity: intensity,
+      velocity,
+      history: [],
+    };
+  } catch {
+    return empty;
+  }
+}
+
 // ========== SUPABASE HELPERS ==========
 
 async function getHistory(trendId: string, limit = 12) {
@@ -494,7 +688,7 @@ async function getHistory(trendId: string, limit = 12) {
   try {
     const { data } = await supabase
       .from('trend_history')
-      .select('timestamp, demand_score, supply_score, unmet_demand_score, breakout_probability, raw_signals')
+      .select('timestamp, demand_score, supply_score, unmet_demand_score, breakout_probability, gap_score, raw_signals')
       .eq('trend_id', trendId)
       .order('timestamp', { ascending: true })
       .limit(limit);
@@ -520,57 +714,91 @@ async function getTrackedTerms() {
 // ========== HANDLER ==========
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-admin-token,authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
+    const canPersist = isAdminRequest(req);
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const zipQuery = typeof req.query.zip === 'string' ? req.query.zip.trim() : '';
+    const location = getLocationContext(zipQuery);
     const isSearchMode = query.length > 0;
+    const trackedTerms = isSearchMode ? [] : await getTrackedTerms();
+    const cappedTerms = trackedTerms.slice(0, Math.max(1, MAX_TERMS_PER_REQUEST));
     const terms = isSearchMode
-      ? [{ id: '', term: query, category: 'Search', neighborhood: 'All Neighborhoods' }]
-      : await getTrackedTerms();
+      ? [{ id: '', term: query, category: 'Search', neighborhood: location.hasZip ? `ZIP ${location.zipCode}` : 'All Neighborhoods' }]
+      : cappedTerms;
+
+    if (!isSearchMode && trackedTerms.length > cappedTerms.length) {
+      res.setHeader('x-trendhunt-terms-capped', `${cappedTerms.length}/${trackedTerms.length}`);
+    }
 
     if (!terms.length) {
       return res.status(200).json([]);
     }
 
+    res.setHeader('x-trendhunt-location', location.regionLabel);
+    res.setHeader('x-trendhunt-serpapi-primary', 'true');
+
     const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
-      const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, youtube, news, maps] = await Promise.all([
-        fetchYelp(item.term),
-        fetchReddit(item.term),
-        fetchSerpTrends(item.term),
-        fetchTikTokSerp(item.term),
+      const [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, backtest, youtube, news, maps] = await Promise.all([
+        fetchYelp(item.term, location),
+        fetchReddit(item.term, location),
+        fetchSerpTrends(item.term, location),
+        fetchTikTokSerp(item.term, location),
         fetchPinterestProxy(item.term),
-        fetchSerpDelivery(item.term),
+        fetchSerpDelivery(item.term, location),
         fetchWildchat(item.term),
         fetchSquareSales(item.term),
         fetchGA4Traffic(item.term),
-        fetchYouTube(item.term),
-        fetchGoogleNews(item.term),
-        fetchGoogleMaps(item.term),
+        fetchGA4BacktestSignal(item.term),
+        fetchYouTube(item.term, location),
+        fetchGoogleNews(item.term, location),
+        fetchGoogleMaps(item.term, location),
       ]);
 
-      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, youtube, news, maps];
-      const ds = demandScore(signals);
-      const ss = supplyScore(signals);
-      const ud = unmetDemand(ds, ss);
-      const bp = breakoutProb(signals);
+      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, wildchat, sales, traffic, backtest, youtube, news, maps];
+      const components = scoreTrend(signals, location.hasZip);
+      const ds = components.intentScore;
+      const ss = components.availabilityScore;
+      const ud = components.gapScore;
+      const bp = breakoutProb(signals, components);
 
       // Persist
       let trendId = item.id || '';
-      if (supabase && !isSearchMode) {
+      if (supabase && !isSearchMode && canPersist) {
         try {
           const { data: row } = await supabase
             .from('trends')
-            .upsert({ term: item.term, category: item.category, region: 'Minneapolis–St Paul', neighborhood: item.neighborhood, last_updated: new Date().toISOString() }, { onConflict: 'term' })
+            .upsert({
+              term: item.term,
+              category: item.category,
+              region: location.regionLabel,
+              neighborhood: item.neighborhood,
+              last_updated: new Date().toISOString(),
+            }, { onConflict: 'term' })
             .select().single();
           if (row) {
             trendId = row.id;
             await supabase.from('trend_history').insert({
-              trend_id: row.id, timestamp: new Date().toISOString(),
-              demand_score: ds, supply_score: ss, unmet_demand_score: ud, breakout_probability: bp, raw_signals: signals,
+              trend_id: row.id,
+              timestamp: new Date().toISOString(),
+              zip_code: location.zipCode || null,
+              demand_score: ds,
+              supply_score: ss,
+              unmet_demand_score: ud,
+              breakout_probability: bp,
+              intent_score: components.intentScore,
+              availability_score: components.availabilityScore,
+              realization_score: components.realizationScore,
+              gap_score: components.gapScore,
+              confidence_score: components.confidenceScore,
+              serpapi_share: components.serpapiShare,
+              evidence: components.evidence,
+              raw_signals: signals,
             });
           }
         } catch (e) { console.error('Supabase persist:', e); }
@@ -581,7 +809,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (trendId && !isSearchMode) {
         const past = await getHistory(trendId, 12);
         if (past.length > 0) {
-          predicted = predictBreakout(past.map((r, i) => ({ week: i + 1, score: r.unmet_demand_score ?? 0 })), ud);
+          predicted = predictBreakout(
+            past.map((r, i) => ({ week: i + 1, score: Number(r.gap_score ?? r.unmet_demand_score ?? 0) })),
+            ud
+          );
           for (const sig of signals) {
             sig.history = past.map((r, i) => {
               const raw = (r.raw_signals as SignalData[]) || [];
@@ -594,11 +825,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       return {
         id: trendId || item.term.replace(/\s+/g, '-').toLowerCase(),
-        term: item.term, category: item.category, region: 'Minneapolis–St Paul', neighborhood: item.neighborhood,
-        signals, supplyScore: ss, demandScore: ds, unmetDemandScore: ud, breakoutProbability: bp,
+        term: item.term,
+        category: item.category,
+        region: location.regionLabel,
+        neighborhood: item.neighborhood,
+        zipCode: location.zipCode || undefined,
+        signals,
+        intentScore: components.intentScore,
+        availabilityScore: components.availabilityScore,
+        realizationScore: components.realizationScore,
+        gapScore: components.gapScore,
+        confidenceScore: components.confidenceScore,
+        serpapiShare: components.serpapiShare,
+        serpapiSignals: components.serpapiSignals,
+        evidence: components.evidence,
+        supplyScore: ss,
+        demandScore: ds,
+        unmetDemandScore: ud,
+        breakoutProbability: bp,
         predictedBreakoutWeek: predicted,
       };
     });
+
+    const serpUsage = await getUsageStats();
+    res.setHeader('x-serpapi-calls-today', String(serpUsage.today));
+    res.setHeader('x-serpapi-calls-month', String(serpUsage.month));
 
     res.status(200).json(trends);
   } catch (error) {
@@ -606,4 +857,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(500).json({ error: 'Failed to fetch trends' });
   }
 }
+
 

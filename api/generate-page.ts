@@ -7,6 +7,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
+import { requireAdminAuth } from '../lib/api-auth.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -21,9 +22,10 @@ const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-admin-token,authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  if (!requireAdminAuth(req, res)) return;
 
   if (!supabase || !ai) return res.status(500).json({ error: 'Missing config' });
 
@@ -108,8 +110,7 @@ Generate:
 
     const generated = JSON.parse(response.text);
 
-    // Save draft to Supabase (new table: page_drafts)
-    // First ensure the table exists — if not, we store in a JSON column on trends
+    // Save draft to Supabase page_drafts table
     const draft = {
       trend_id: trendId,
       trend_term: trend.term,
@@ -124,7 +125,7 @@ Generate:
       created_at: new Date().toISOString(),
     };
 
-    // Try page_drafts table, fall back to updating trend metadata
+    // Save in page_drafts
     const { data: saved, error: saveError } = await supabase
       .from('page_drafts')
       .insert(draft)
@@ -132,10 +133,8 @@ Generate:
       .single();
 
     if (saveError) {
-      // Table might not exist yet — store on trend record as metadata
-      console.warn('page_drafts table not found, storing on trend:', saveError.message);
-      await supabase.from('trends').update({ page_draft: draft }).eq('id', trendId);
-      return res.status(200).json({ ok: true, draft, stored: 'trend_metadata' });
+      console.error('Failed to save page draft:', saveError.message);
+      return res.status(500).json({ error: `Failed to save draft: ${saveError.message}` });
     }
 
     // Optionally push to Sanity CMS

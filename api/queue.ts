@@ -1,23 +1,26 @@
 /**
  * Discovery Queue Admin API
- * GET  /api/queue         — list pending items
- * POST /api/queue         — approve or reject { id, action: 'approve' | 'reject' }
+ * GET  /api/queue         - list pending items
+ * POST /api/queue         - approve or reject { id, action: 'approve' | 'reject' }
  */
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
+import { requireAdminAuth } from '../lib/api-auth.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const DEFAULT_REGION_LABEL = (process.env.DEFAULT_REGION_LABEL || 'All Locations').trim();
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-admin-token,authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (!supabase) return res.status(500).json({ error: 'Supabase not configured' });
+  if (!requireAdminAuth(req, res)) return;
 
   // GET: list pending
   if (req.method === 'GET') {
@@ -34,7 +37,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // POST: approve or reject
   if (req.method === 'POST') {
-    const { id, action, category, neighborhood } = req.body || {};
+    const { id, action, category, neighborhood, region } = req.body || {};
     if (!id || !action) return res.status(400).json({ error: 'id and action required' });
 
     if (action === 'approve') {
@@ -42,12 +45,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const { data: item } = await supabase.from('discovery_queue').select('*').eq('id', id).single();
       if (!item) return res.status(404).json({ error: 'Not found' });
 
+      const zipFromBody = /^\d{5}$/.test(String(neighborhood || '').trim()) ? String(neighborhood).trim() : '';
+      const zipFromSource = String(item.source || '').match(/\bzip\s+(\d{5})\b/i)?.[1] || '';
+      const zipCode = zipFromBody || zipFromSource;
+      const resolvedNeighborhood = zipCode ? `ZIP ${zipCode}` : (neighborhood || 'Unknown');
+      const resolvedRegion = region || (zipCode ? `ZIP ${zipCode}` : DEFAULT_REGION_LABEL);
+
       // Insert into tracked trends
       const { error: insertError } = await supabase.from('trends').upsert({
         term: item.term,
         category: category || 'Uncategorized',
-        neighborhood: neighborhood || 'Unknown',
-        region: 'Minneapolis–St Paul',
+        neighborhood: resolvedNeighborhood,
+        region: resolvedRegion,
       }, { onConflict: 'term' });
 
       if (insertError) return res.status(500).json({ error: insertError.message });

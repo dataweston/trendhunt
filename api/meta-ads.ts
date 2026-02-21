@@ -6,6 +6,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import { GoogleGenAI, Type } from '@google/genai';
+import { requireAdminAuth } from '../lib/api-auth.js';
 
 const META_ACCESS_TOKEN = process.env.FACEBOOK_ACCESS_TOKEN;
 const META_AD_ACCOUNT_ID = process.env.FACEBOOK_AD_ACCOUNT_ID;
@@ -17,8 +18,9 @@ const META_API = 'https://graph.facebook.com/v21.0';
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-admin-token,authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!requireAdminAuth(req, res)) return;
 
   if (!META_ACCESS_TOKEN || !META_AD_ACCOUNT_ID) {
     return res.status(200).json({ error: 'Meta Ads not configured', campaigns: [] });

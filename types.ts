@@ -9,6 +9,7 @@ export enum Platform {
   Wildchat = 'Wildchat',
   OwnSales = 'OwnSales',
   OwnTraffic = 'OwnTraffic',
+  GA4Backtest = 'GA4Backtest',
   MetaAds = 'MetaAds',
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
@@ -33,7 +34,16 @@ export interface TrendEntity {
   category: string; // e.g., "Mexican"
   region: string; // e.g., "Minneapolis–St Paul"
   neighborhood: string; // e.g. "North Loop"
+  zipCode?: string;
   signals: SignalData[];
+  intentScore: number; // 0-100 local intent
+  availabilityScore: number; // 0-100 local availability
+  realizationScore: number; // 0-100 local purchase realization
+  gapScore: number; // 0-100 unmet demand gap
+  confidenceScore: number; // 0-100 score confidence
+  serpapiShare: number; // 0-100 signal share from SerpAPI-backed sources
+  serpapiSignals: string[]; // contributing SerpAPI-backed platforms
+  evidence: string[]; // short explanatory evidence lines
   supplyScore: number; // 0-100 (100 = saturated)
   demandScore: number; // 0-100 (100 = viral)
   unmetDemandScore: number; // Calculated (Demand - Supply)

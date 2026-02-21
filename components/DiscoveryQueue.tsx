@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Check, X, Loader2, Inbox, Sparkles, MapPin, Search } from 'lucide-react';
 import { DiscoveryQueueItem } from '../types';
+import { getAdminHeaders, getStoredAdminToken, setStoredAdminToken } from '../services/adminAuth';
 
 interface DiscoveryQueueProps {
   onApproved?: () => void;
@@ -10,15 +11,23 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
   const [items, setItems] = useState<DiscoveryQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
-  const [zipCode, setZipCode] = useState('55113');
+  const [zipCode, setZipCode] = useState('');
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<string | null>(null);
+  const [adminTokenInput, setAdminTokenInput] = useState(() => getStoredAdminToken());
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   const fetchQueue = async () => {
     setLoading(true);
+    setAuthNotice(null);
     try {
-      const res = await fetch('/api/queue?status=pending');
-      if (res.ok) setItems(await res.json());
+      const res = await fetch('/api/queue?status=pending', { headers: getAdminHeaders() });
+      if (res.status === 401) {
+        setItems([]);
+        setAuthNotice('Admin token required to view and manage the discovery queue.');
+      } else if (res.ok) {
+        setItems(await res.json());
+      }
     } catch { /* ignore */ }
     setLoading(false);
   };
@@ -30,8 +39,9 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
     if (!/^\d{5}$/.test(zip)) { setScanResult('Enter a valid 5-digit zip code'); return; }
     setScanning(true);
     setScanResult(null);
+    setAuthNotice(null);
     try {
-      const res = await fetch(`/api/discover?manual=true&zip=${zip}`);
+      const res = await fetch(`/api/discover?manual=true&zip=${zip}`, { headers: getAdminHeaders() });
       const data = await res.json();
       if (res.ok) {
         const s = data.sources || {};
@@ -39,19 +49,23 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
           `${data.processed || 0} terms queued`,
           s.reddit_titles ? `${s.reddit_titles} Reddit posts` : null,
           s.nlp_extracted ? `${s.nlp_extracted} NLP extracted` : null,
-          s.yelp_categories ? `${s.yelp_categories} Yelp cats` : null,
+          s.yelp_categories ? `${s.yelp_categories} Yelp categories` : null,
           s.rising ? `${s.rising} rising queries` : null,
+          s.ga4_boosted_candidates ? `${s.ga4_boosted_candidates} GA4-prior boosts` : null,
         ].filter(Boolean);
-        setScanResult(parts.join(' · '));
+        setScanResult(parts.join(' | '));
         if (data.debug?.extracted_terms?.length) {
           setScanResult(prev => `${prev}\nTerms: ${data.debug.extracted_terms.join(', ')}`);
         }
         await fetchQueue(); // refresh the queue
+      } else if (res.status === 401) {
+        setAuthNotice('Admin token required to run manual discovery.');
+        setScanResult('Error: Unauthorized');
       } else {
         setScanResult(`Error: ${data.error || 'Scan failed'}`);
       }
     } catch (e) {
-      setScanResult('Network error — check deployment');
+      setScanResult('Network error - check deployment');
     }
     setScanning(false);
   };
@@ -61,12 +75,19 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
     try {
       const res = await fetch('/api/queue', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, action, neighborhood: zipCode.trim() || 'Unknown' }),
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
+        body: JSON.stringify({
+          id,
+          action,
+          neighborhood: zipCode.trim() || 'Unknown',
+          region: zipCode.trim() ? `ZIP ${zipCode.trim()}` : 'All Locations',
+        }),
       });
       if (res.ok) {
         setItems(prev => prev.filter(i => i.id !== id));
         if (action === 'approve' && onApproved) onApproved();
+      } else if (res.status === 401) {
+        setAuthNotice('Admin token required for approve/reject actions.');
       }
     } catch { /* ignore */ }
     setActing(null);
@@ -78,8 +99,35 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
     }
   };
 
+  const saveAdminToken = () => {
+    setStoredAdminToken(adminTokenInput);
+    setAuthNotice(adminTokenInput.trim() ? 'Admin token saved for this browser session.' : 'Admin token cleared.');
+    fetchQueue();
+  };
+
   return (
     <div className="space-y-6">
+      <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+        <h3 className="text-sm font-medium text-white mb-3">Admin Token</h3>
+        <div className="flex gap-2">
+          <input
+            type="password"
+            value={adminTokenInput}
+            onChange={(e) => setAdminTokenInput(e.target.value)}
+            placeholder="Enter admin token"
+            className="flex-1 bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500/50 transition-all"
+          />
+          <button
+            type="button"
+            onClick={saveAdminToken}
+            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            Save
+          </button>
+        </div>
+        {authNotice && <p className="text-xs text-slate-400 mt-2">{authNotice}</p>}
+      </div>
+
       {/* Zip Code Scanner */}
       <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-3">
@@ -87,12 +135,12 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
           <h3 className="text-sm font-medium text-white">Scan a Zip Code</h3>
         </div>
         <p className="text-xs text-slate-400 mb-3">
-          Searches Yelp hot &amp; new restaurants, Google Trends rising queries, and Reddit food posts near this zip code. Discovered terms appear below for approval.
+          SerpAPI-first scan using Yelp and Google Trends for this ZIP, with Reddit enrichment and GA4 backtest priors to rank candidates before queuing.
         </p>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); scanZip(); }}>
           <input
             type="text"
-            placeholder="55113"
+            placeholder="10001"
             value={zipCode}
             onChange={(e) => setZipCode(e.target.value)}
             maxLength={5}
@@ -123,7 +171,7 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
       ) : items.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-8 text-slate-500">
           <Inbox size={24} className="mb-2 opacity-50" />
-          <span className="text-sm">No pending discoveries — try scanning a zip code above</span>
+          <span className="text-sm">No pending discoveries - try scanning a ZIP code above</span>
         </div>
       ) : (
         <>
@@ -162,7 +210,7 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
                     onClick={() => act(item.id, 'approve')}
                     disabled={acting === item.id}
                     className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
-                    title="Approve — add to tracked trends"
+                    title="Approve - add to tracked trends"
                   >
                     {acting === item.id ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                   </button>

@@ -23,6 +23,10 @@
     "api/meta-ads.ts": {
       "memory": 512,
       "maxDuration": 15
+    },
+    "api/ga4-backtest.ts": {
+      "memory": 1024,
+      "maxDuration": 60
     }
   },
   "crons": [

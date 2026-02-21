@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback, Suspense, lazy } from 'react';
+import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox, RefreshCw, BarChart3 } from 'lucide-react';
 import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
-import { OpportunityTable } from './components/OpportunityTable';
-import { TrendDetail } from './components/TrendDetail';
-import { TrendTimeSeries, PropagationGraph, GeoMap } from './components/Visualizations';
-import { DiscoveryQueue } from './components/DiscoveryQueue';
+
+const OpportunityTable = lazy(() => import('./components/OpportunityTable').then((m) => ({ default: m.OpportunityTable })));
+const TrendDetail = lazy(() => import('./components/TrendDetail').then((m) => ({ default: m.TrendDetail })));
+const PropagationGraph = lazy(() => import('./components/Visualizations').then((m) => ({ default: m.PropagationGraph })));
+const GeoMap = lazy(() => import('./components/GeoMap').then((m) => ({ default: m.GeoMap })));
+const DiscoveryQueue = lazy(() => import('./components/DiscoveryQueue').then((m) => ({ default: m.DiscoveryQueue })));
+const BacktestPanel = lazy(() => import('./components/BacktestPanel').then((m) => ({ default: m.BacktestPanel })));
 
 const App = () => {
   const [trends, setTrends] = useState<TrendEntity[]>([]);
@@ -13,14 +16,16 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedTrend, setSelectedTrend] = useState<TrendEntity | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [zipCode, setZipCode] = useState('');
   const [activeSearch, setActiveSearch] = useState(''); // committed search
-  const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue'>('dashboard');
+  const [activeZip, setActiveZip] = useState(''); // committed zip scope
+  const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue' | 'backtest'>('dashboard');
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
-  const loadData = useCallback(async (query = '', forceRefresh = false) => {
+  const loadData = useCallback(async (query = '', zip = '', forceRefresh = false) => {
     setLoading(true);
     try {
-      const data = await trendService.getTrends(query, forceRefresh);
+      const data = await trendService.getTrends(query, forceRefresh, zip);
       setTrends(data);
       setError(null);
       setLastRefresh(new Date());
@@ -39,20 +44,24 @@ const App = () => {
 
   const handleForceRefresh = useCallback(() => {
     trendService.clearCache();
-    loadData(activeSearch, true);
-  }, [loadData, activeSearch]);
+    loadData(activeSearch, activeZip, true);
+  }, [loadData, activeSearch, activeZip]);
 
   // Only search when user explicitly submits
   const handleSearch = useCallback(() => {
     const q = searchTerm.trim();
+    const z = zipCode.trim();
     setActiveSearch(q);
-    loadData(q);
-  }, [searchTerm, loadData]);
+    setActiveZip(z);
+    loadData(q, z);
+  }, [searchTerm, zipCode, loadData]);
 
   const clearSearch = useCallback(() => {
     setSearchTerm('');
+    setZipCode('');
     setActiveSearch('');
-    loadData();
+    setActiveZip('');
+    loadData('', '');
   }, [loadData]);
 
   const activeAlerts = trends.filter(t => t.breakoutProbability > 75).length;
@@ -82,6 +91,10 @@ const App = () => {
           <button onClick={() => setActiveNav('queue')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'queue' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
             <Inbox size={18} />
             <span className="font-medium">Discovery Queue</span>
+          </button>
+          <button onClick={() => setActiveNav('backtest')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'backtest' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
+            <BarChart3 size={18} />
+            <span className="font-medium">GA4 Backtest</span>
           </button>
           <div className="flex items-center gap-3 px-4 py-3 text-slate-400 hover:bg-slate-800/30 hover:text-slate-200 rounded-lg cursor-pointer transition-colors">
             <Bell size={18} />
@@ -130,11 +143,21 @@ const App = () => {
                       onChange={(e) => setSearchTerm(e.target.value)}
                    />
                  </div>
-                 {activeSearch && (
-                   <button type="button" onClick={clearSearch} className="text-xs text-slate-400 hover:text-white px-3 py-1 rounded-full border border-slate-700 hover:border-slate-500 transition-colors">
-                     Clear
-                   </button>
-                 )}
+                 <input
+                   type="text"
+                   inputMode="numeric"
+                   pattern="\d{5}"
+                   maxLength={5}
+                   placeholder="ZIP"
+                   className="w-24 bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-full px-3 py-2 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
+                   value={zipCode}
+                   onChange={(e) => setZipCode(e.target.value.replace(/[^\d]/g, ''))}
+                 />
+                 {(activeSearch || activeZip) && (
+                    <button type="button" onClick={clearSearch} className="text-xs text-slate-400 hover:text-white px-3 py-1 rounded-full border border-slate-700 hover:border-slate-500 transition-colors">
+                      Clear
+                    </button>
+                  )}
               </form>
            </div>
            <div className="flex items-center gap-4 ml-4">
@@ -148,12 +171,12 @@ const App = () => {
                 <span className="hidden sm:inline">Refresh</span>
               </button>
               <div className="text-right hidden sm:block">
-                  <div className="text-xs text-slate-400">Region</div>
+                  <div className="text-xs text-slate-400">Scope</div>
                   <div className="text-sm font-medium text-white flex items-center gap-1 cursor-pointer hover:text-emerald-400">
-                     Minneapolis–St Paul <span className="text-[10px] opacity-50">▼</span>
+                     {activeZip ? `ZIP ${activeZip}` : 'All Locations'} <span className="text-[10px] opacity-50">v</span>
                   </div>
               </div>
-              <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white font-bold">
+              <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white font-bold"> 
                  TH
               </div>
            </div>
@@ -163,12 +186,24 @@ const App = () => {
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
 
            {activeNav === 'queue' && (
-             <div className="max-w-2xl">
-               <h2 className="text-xl font-bold text-white mb-4">Discovery Queue</h2>
-               <p className="text-sm text-slate-400 mb-6">Scan a zip code to discover trending food in that area, or review terms found automatically.</p>
-               <DiscoveryQueue onApproved={() => loadData()} />
-             </div>
-           )}
+              <div className="max-w-2xl">
+                <h2 className="text-xl font-bold text-white mb-4">Discovery Queue</h2>
+                <p className="text-sm text-slate-400 mb-6">Scan a ZIP code to discover local demand gaps, or review terms found automatically.</p>
+                <Suspense fallback={<div className="text-slate-500 text-sm">Loading queue...</div>}>
+                  <DiscoveryQueue onApproved={() => loadData(activeSearch, activeZip)} />
+                </Suspense>
+              </div>
+            )}
+
+           {activeNav === 'backtest' && (
+              <div className="max-w-4xl">
+                <h2 className="text-xl font-bold text-white mb-4">GA4 Historical Backtest</h2>
+                <p className="text-sm text-slate-400 mb-6">Analyze 3 years of your restaurant's Google Analytics data to find keywords with trend-like growth patterns.</p>
+                <Suspense fallback={<div className="text-slate-500 text-sm">Loading backtest panel...</div>}>
+                  <BacktestPanel onApproved={() => loadData(activeSearch, activeZip)} />
+                </Suspense>
+              </div>
+            )}
 
            {activeNav === 'dashboard' && error && (
              <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-4 rounded-lg flex items-center gap-3">
@@ -182,7 +217,7 @@ const App = () => {
                <Inbox size={32} className="mx-auto mb-3 text-slate-500" />
                <h3 className="text-lg font-medium text-white mb-2">No terms tracked yet</h3>
                <p className="text-sm text-slate-400 mb-4 max-w-md mx-auto">
-                 Go to the <button onClick={() => setActiveNav('queue')} className="text-emerald-400 underline hover:text-emerald-300">Discovery Queue</button> and scan a zip code (e.g. 55113) to discover food trends in your area. Approve terms to start tracking them here.
+                 Go to the <button onClick={() => setActiveNav('queue')} className="text-emerald-400 underline hover:text-emerald-300">Discovery Queue</button> and scan a ZIP code (for example, 10001) to discover local food demand gaps. Approve terms to start tracking them here.
                </p>
                <p className="text-xs text-slate-500">Or search for a specific food term above to preview its signals.</p>
              </div>
@@ -192,21 +227,23 @@ const App = () => {
            {/* KPI Cards */}
            {(trends.length > 0 || activeSearch) && (
            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">{activeSearch ? 'Search Results' : 'Tracked Terms'}</div>
-                  <div className="text-2xl font-bold text-white mt-1">{trends.length}</div>
-                  <div className="text-xs text-emerald-400 mt-1">{activeSearch ? `"${activeSearch}"` : 'Live'}</div>
-              </div>
+               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
+                   <div className="text-slate-400 text-xs font-medium uppercase">{activeSearch ? 'Search Results' : 'Tracked Terms'}</div>
+                   <div className="text-2xl font-bold text-white mt-1">{trends.length}</div>
+                   <div className="text-xs text-emerald-400 mt-1">
+                     {activeSearch ? `"${activeSearch}"` : 'Live'}{activeZip ? ` | ZIP ${activeZip}` : ''}
+                   </div>
+               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">High Probability Breakouts</div>
                   <div className="text-2xl font-bold text-emerald-400 mt-1">{trends.filter(t => t.breakoutProbability > 70).length}</div>
                   <div className="text-xs text-slate-500 mt-1">Probability &gt; 70%</div>
               </div>
-              <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Avg Unmet Demand</div>
-                  <div className="text-2xl font-bold text-orange-400 mt-1">{trends.length > 0 ? Math.round(trends.reduce((a, t) => a + t.unmetDemandScore, 0) / trends.length) : 0}/100</div>
-                  <div className="text-xs text-slate-500 mt-1">Regional Average</div>
-              </div>
+               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
+                   <div className="text-slate-400 text-xs font-medium uppercase">Avg Demand Gap</div>
+                   <div className="text-2xl font-bold text-orange-400 mt-1">{trends.length > 0 ? Math.round(trends.reduce((a, t) => a + (t.gapScore ?? t.unmetDemandScore), 0) / trends.length) : 0}/100</div>
+                   <div className="text-xs text-slate-500 mt-1">Regional Average</div>
+               </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
                   <div className="text-slate-400 text-xs font-medium uppercase">Your Website Traffic</div>
                   {(() => {
@@ -227,10 +264,12 @@ const App = () => {
 
            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Main Chart Area */}
-              <div className="lg:col-span-2 space-y-6">
-                  <div className="bg-slate-800/20 rounded-xl">
-                     <OpportunityTable trends={trends} onSelectTrend={setSelectedTrend} />
-                  </div>
+               <div className="lg:col-span-2 space-y-6">
+                   <div className="bg-slate-800/20 rounded-xl">
+                     <Suspense fallback={<div className="p-6 text-slate-500 text-sm">Loading table...</div>}>
+                       <OpportunityTable trends={trends} onSelectTrend={setSelectedTrend} />
+                     </Suspense>
+                   </div>
                   
                   {/* Featured Analysis */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -243,8 +282,12 @@ const App = () => {
                         </div>
                       ) : (
                         <>
-                          <PropagationGraph trends={trends} />
-                          <GeoMap trends={trends} />
+                          <Suspense fallback={<div className="h-[300px] rounded-lg border border-slate-700 bg-slate-800/50 flex items-center justify-center text-slate-500 text-sm">Loading propagation graph...</div>}>
+                            <PropagationGraph trends={trends} />
+                          </Suspense>
+                          <Suspense fallback={<div className="h-[400px] rounded-lg border border-slate-700 bg-slate-800/50 flex items-center justify-center text-slate-500 text-sm">Loading map...</div>}>
+                            <GeoMap trends={trends} />
+                          </Suspense>
                         </>
                       )}
                   </div>
@@ -311,7 +354,7 @@ const App = () => {
                         <p className="text-xs text-indigo-100/70 mb-2">
                           <strong>{top.term}</strong> has a {top.breakoutProbability}% breakout probability in {top.neighborhood}.
                           {top.predictedBreakoutWeek > 0 && <> Estimated breakout in ~{top.predictedBreakoutWeek} weeks.</>}
-                          {' '}Unmet demand score: {top.unmetDemandScore}/100.
+                          {' '}Demand gap score: {top.gapScore ?? top.unmetDemandScore}/100.
                         </p>
                       </div>
                     );
@@ -323,22 +366,27 @@ const App = () => {
            {activeNav === 'geo' && (
              <div className="h-full">
                <h2 className="text-xl font-bold text-white mb-4">Geospatial View</h2>
-               {loading ? (
-                 <div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>
-               ) : (
-                 <GeoMap trends={trends} />
-               )}
-             </div>
-           )}
+                {loading ? (
+                  <div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>
+                ) : (
+                  <Suspense fallback={<div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>}>
+                    <GeoMap trends={trends} />
+                  </Suspense>
+                )}
+              </div>
+            )}
 
         </div>
       </main>
 
       {/* Detail Modal */}
-      <TrendDetail trend={selectedTrend} onClose={() => setSelectedTrend(null)} />
+      <Suspense fallback={null}>
+        <TrendDetail trend={selectedTrend} onClose={() => setSelectedTrend(null)} />
+      </Suspense>
 
     </div>
   );
 };
 
 export default App;
+

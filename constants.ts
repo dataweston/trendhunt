@@ -7,7 +7,22 @@ import {
 } from './utils/scoring';
 
 // Raw data without the calculated scores
-const RAW_TRENDS: Omit<TrendEntity, 'supplyScore' | 'demandScore' | 'unmetDemandScore' | 'breakoutProbability'>[] = [
+const RAW_TRENDS: Omit<
+  TrendEntity,
+  | 'zipCode'
+  | 'intentScore'
+  | 'availabilityScore'
+  | 'realizationScore'
+  | 'gapScore'
+  | 'confidenceScore'
+  | 'serpapiShare'
+  | 'serpapiSignals'
+  | 'evidence'
+  | 'supplyScore'
+  | 'demandScore'
+  | 'unmetDemandScore'
+  | 'breakoutProbability'
+>[] = [
   {
     id: '1',
     term: 'Mochi Donuts',
@@ -132,9 +147,20 @@ export const MOCK_TRENDS: TrendEntity[] = RAW_TRENDS.map(trend => {
   const supplyScore = calculateSupplyScore(trend.signals);
   const unmetDemandScore = calculateUnmetDemandScore(demandScore, supplyScore);
   const breakoutProbability = calculateBreakoutProbability(trend.signals);
+  const serpapiSignals = trend.signals
+    .filter(s => [Platform.GoogleSearch, Platform.DoorDash, Platform.Yelp, Platform.GoogleMaps].includes(s.platform))
+    .map(s => s.platform);
 
   return {
     ...trend,
+    intentScore: demandScore,
+    availabilityScore: supplyScore,
+    realizationScore: Math.max(0, Math.round(demandScore * 0.55)),
+    gapScore: unmetDemandScore,
+    confidenceScore: 55,
+    serpapiShare: 65,
+    serpapiSignals,
+    evidence: ['Mock dataset: indicative only.'],
     demandScore,
     supplyScore,
     unmetDemandScore,
@@ -153,6 +179,7 @@ export const PLATFORM_COLORS: Record<Platform, string> = {
   [Platform.Wildchat]: '#f1c40f',
   [Platform.OwnSales]: '#10b981',
   [Platform.OwnTraffic]: '#8b5cf6',
+  [Platform.GA4Backtest]: '#f59e0b',
   [Platform.MetaAds]: '#3b82f6',
   [Platform.YouTube]: '#FF0000',
   [Platform.GoogleNews]: '#4285F4',

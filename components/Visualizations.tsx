@@ -67,6 +67,10 @@ interface NetworkNode extends d3.SimulationNodeDatum {
   id: Platform;
   group: number;
   r: number;
+  x?: number;
+  y?: number;
+  fx?: number | null;
+  fy?: number | null;
 }
 
 // Define Link interface to handle D3 mutations
