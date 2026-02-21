@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Loader2, TrendingUp, TrendingDown, ArrowRight, BarChart3, Clock, Zap } from 'lucide-react';
-import { getAdminHeaders } from '../services/adminAuth';
+import { getAdminHeaders, getStoredAdminToken, setStoredAdminToken } from '../services/adminAuth';
 
 interface BacktestCandidate {
   term: string;
@@ -54,6 +54,14 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
   const [autoQueue, setAutoQueue] = useState(false);
   const [sortBy, setSortBy] = useState<'score' | 'growth' | 'volume' | 'recent'>('score');
   const [expandedTerm, setExpandedTerm] = useState<string | null>(null);
+  const [adminTokenInput, setAdminTokenInput] = useState(() => getStoredAdminToken());
+  const [authNotice, setAuthNotice] = useState('');
+
+  const saveAdminToken = () => {
+    setStoredAdminToken(adminTokenInput);
+    setAuthNotice(adminTokenInput.trim() ? 'Token saved for this session.' : 'Token cleared.');
+    setTimeout(() => setAuthNotice(''), 3000);
+  };
 
   const runBacktest = useCallback(async () => {
     setLoading(true);
@@ -86,6 +94,27 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
 
   return (
     <div className="space-y-4">
+      {/* Admin Token */}
+      {!getStoredAdminToken() && (
+        <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+          <div className="text-xs text-slate-400 mb-2">Enter your admin token (CRON_SECRET) to authenticate API calls:</div>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              placeholder="Admin token..."
+              className="flex-1 bg-slate-900 border border-slate-700 text-sm text-slate-200 rounded px-3 py-1.5 focus:outline-none focus:border-amber-500/50"
+              value={adminTokenInput}
+              onChange={(e) => setAdminTokenInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && saveAdminToken()}
+            />
+            <button onClick={saveAdminToken} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded transition-colors">
+              Save
+            </button>
+          </div>
+          {authNotice && <div className="text-xs text-emerald-400 mt-1">{authNotice}</div>}
+        </div>
+      )}
+
       {/* Header / Controls */}
       <div className="bg-gradient-to-r from-amber-950/30 to-slate-800/30 rounded-lg border border-amber-500/20 p-5">
         <div className="flex items-start justify-between gap-4 flex-wrap">
