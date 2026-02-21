@@ -176,6 +176,70 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
             )}
           </div>
 
+          {/* Raw signal counts — the actual numbers behind the scores */}
+          {trend.signalRawCounts && (
+            <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-4 py-3">
+              <div className="text-[10px] uppercase font-semibold text-slate-500 mb-2 tracking-wider">Actual data behind these scores</div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1.5 text-xs">
+                {trend.signalRawCounts.monthlySearches != null && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Google searches/mo</span>
+                    <span className="font-medium text-blue-300">{Number(trend.signalRawCounts.monthlySearches).toLocaleString()}</span>
+                  </div>
+                )}
+                {trend.signalRawCounts.kwpCompetition != null && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">KWP competition</span>
+                    <span className="font-medium text-slate-300">{trend.signalRawCounts.kwpCompetition}/100</span>
+                  </div>
+                )}
+                {trend.signalRawCounts.kwpCpcCents != null && Number(trend.signalRawCounts.kwpCpcCents) > 0 && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Avg CPC</span>
+                    <span className="font-medium text-slate-300">${(Number(trend.signalRawCounts.kwpCpcCents) / 100).toFixed(2)}</span>
+                  </div>
+                )}
+                {trend.signalRawCounts.yelpOpenCompetitors != null && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Open competitors (Yelp Places)</span>
+                    <span className={`font-medium ${Number(trend.signalRawCounts.yelpOpenCompetitors) <= 2 ? 'text-emerald-400' : Number(trend.signalRawCounts.yelpOpenCompetitors) <= 5 ? 'text-amber-400' : 'text-red-400'}`}>
+                      {trend.signalRawCounts.yelpOpenCompetitors}
+                    </span>
+                  </div>
+                )}
+                {trend.signalRawCounts.yelpAvgRating != null && Number(trend.signalRawCounts.yelpAvgRating) > 0 && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Competitors avg rating</span>
+                    <span className="font-medium text-slate-300">{trend.signalRawCounts.yelpAvgRating}★</span>
+                  </div>
+                )}
+                {trend.signalRawCounts.redditPostsLast7d != null && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Reddit posts / 7d</span>
+                    <span className={`font-medium ${Number(trend.signalRawCounts.redditPostsLast7d) >= 5 ? 'text-emerald-400' : 'text-slate-300'}`}>
+                      {trend.signalRawCounts.redditPostsLast7d}
+                      {trend.signalRawCounts.redditAccelerating ? ' ↑' : ''}
+                    </span>
+                  </div>
+                )}
+                {trend.signalRawCounts.redditQuestionPosts != null && Number(trend.signalRawCounts.redditQuestionPosts) > 0 && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Reddit "where can I find"</span>
+                    <span className="font-medium text-amber-300">{trend.signalRawCounts.redditQuestionPosts} posts</span>
+                  </div>
+                )}
+                {trend.surgeScore != null && (
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Surge score</span>
+                    <span className={`font-medium ${(trend.surgeScore ?? 0) >= 60 ? 'text-emerald-400' : (trend.surgeScore ?? 0) >= 40 ? 'text-amber-400' : 'text-slate-400'}`}>
+                      {trend.surgeScore}/100 {trend.surgeLabel ? `(${trend.surgeLabel})` : ''}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Stats Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">

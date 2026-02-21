@@ -5,6 +5,10 @@ import { serpSearch, getUsageStats } from '../lib/serp-governor.js';
 import { isAdminRequest } from '../lib/api-auth.js';
 import { getLocationContext, type LocationContext } from '../lib/location.js';
 import { normalizeTermKey, similarityScore } from '../lib/term-normalizer.js';
+import { getKeywordVolume, keywordVolumeToIntensity } from '../lib/keyword-planner.js';
+import { fetchYelpFusion, yelpCountToIntensity } from '../lib/yelp-fusion.js';
+import { getRedditVolume } from '../lib/reddit-volume.js';
+import { computeSurge } from '../lib/trend-surge.js';
 
 // --- Types (standalone for serverless) ---
 enum Platform {
@@ -25,6 +29,10 @@ enum Platform {
   GoogleMaps = 'GoogleMaps',
   ConversationalSearch = 'ConversationalSearch',
   LocalRedditIntent = 'LocalRedditIntent',
+  // New signals
+  KeywordPlanner = 'KeywordPlanner',   // Google Ads absolute search volume
+  YelpFusion = 'YelpFusion',           // Yelp Places API direct (rebranded from "Fusion" in 2024; same endpoint)
+  RedditVolume = 'RedditVolume',       // Reddit time-series volume (Pushshift mimic)
 }
 
 interface SignalData {
@@ -33,6 +41,8 @@ interface SignalData {
   currentIntensity: number;
   velocity: number;
   supplyQuality?: number; // 0-100, set on Yelp/GoogleMaps signals (Module 4)
+  /** Raw source counts for display — e.g. { searches: 3600, listings: 4, posts: 12 } */
+  rawCounts?: Record<string, number | string>;
 }
 
 interface TermFunnel {
@@ -73,6 +83,10 @@ interface TrendEntity {
   // Module 5: Funnel attribution
   conversionDeficitScore?: number;
   funnelData?: TermFunnel;
+  // Raw source counts for display (absolute numbers behind scores)
+  signalRawCounts?: Record<string, number | string | boolean | null>;
+  surgeScore?: number;
+  surgeLabel?: string;
 }
 
 // --- Config ---
@@ -144,8 +158,12 @@ const WEIGHTS: Record<string, number> = {
   TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
   Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.9, InstagramOrganic: 0.9, RedditPushshift: 0.3,
   ConversationalSearch: 1.2, LocalRedditIntent: 1.3,
+  // New signals — high weights because they carry absolute/real data
+  KeywordPlanner: 3.0,   // Absolute monthly search volume → best intent anchor
+  YelpFusion: 2.2,       // Direct Yelp API → better supply than SerpAPI scrape
+  RedditVolume: 1.5,     // Time-series Reddit volume → better than snapshot count
 };
-const SUPPLY = new Set<Platform>([Platform.Yelp, Platform.GoogleMaps]);
+const SUPPLY = new Set<Platform>([Platform.Yelp, Platform.GoogleMaps, Platform.YelpFusion]);
 const SERPAPI_PLATFORMS = new Set<Platform>([
   Platform.GoogleSearch,
   Platform.DoorDash,
@@ -155,6 +173,12 @@ const SERPAPI_PLATFORMS = new Set<Platform>([
   Platform.GoogleNews,
   Platform.GoogleMaps,
   Platform.ConversationalSearch,
+]);
+// External high-quality signals (not SerpAPI but similarly weighted in confidence)
+const PREMIUM_PLATFORMS = new Set<Platform>([
+  Platform.KeywordPlanner,
+  Platform.YelpFusion,
+  Platform.RedditVolume,
 ]);
 
 function clampScore(value: number): number {
@@ -183,7 +207,10 @@ const demandScore = (signals: SignalData[]): number => {
 const supplyScore = (signals: SignalData[]): number => {
   const supplySignals = signals.filter((s) => SUPPLY.has(s.platform));
   if (supplySignals.length === 0) return 5;
-  const yelp = supplySignals.find((s) => s.platform === Platform.Yelp)?.currentIntensity || 0;
+  // Prefer Yelp Places API (direct, open businesses only) over SerpAPI Yelp scrape
+  const yelpFusion = supplySignals.find((s) => s.platform === Platform.YelpFusion)?.currentIntensity || 0;
+  const yelpSerp = supplySignals.find((s) => s.platform === Platform.Yelp)?.currentIntensity || 0;
+  const yelp = yelpFusion > 0 ? yelpFusion : yelpSerp;
   const maps = supplySignals.find((s) => s.platform === Platform.GoogleMaps)?.currentIntensity || 0;
   const weighted = maps * 0.6 + yelp * 0.4;
   return clampScore(weighted || 5);
@@ -215,6 +242,9 @@ const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): numbe
   const hasBacktest = activeSignals.some((s) => s.platform === Platform.GA4Backtest);
   const hasMetaAds = activeSignals.some((s) => s.platform === Platform.MetaAds);
   const hasInstagramOrganic = activeSignals.some((s) => s.platform === Platform.InstagramOrganic);
+  const hasKeywordPlanner = activeSignals.some((s) => s.platform === Platform.KeywordPlanner);
+  const hasYelpFusion = activeSignals.some((s) => s.platform === Platform.YelpFusion);
+  const hasRedditVolume = activeSignals.some((s) => s.platform === Platform.RedditVolume);
 
   let score = 20;
   score += activeSignals.length * 4;
@@ -225,6 +255,10 @@ const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): numbe
   if (hasMetaAds) score += 3;
   if (hasInstagramOrganic) score += 3;
   if (hasZip) score += 5;
+  // Premium signals add significant confidence because they carry absolute data
+  if (hasKeywordPlanner) score += 12;
+  if (hasYelpFusion) score += 8;
+  if (hasRedditVolume) score += 5;
   return clampScore(score);
 };
 
@@ -252,22 +286,66 @@ const buildEvidence = (
   const metaAds = byPlatform.get(Platform.MetaAds)?.currentIntensity || 0;
   const instagramOrganic = byPlatform.get(Platform.InstagramOrganic)?.currentIntensity || 0;
 
+  // ── New: absolute-data signals ───────────────────────────────────────────
+  const kwpSig = byPlatform.get(Platform.KeywordPlanner);
+  const yelpFusionSig = byPlatform.get(Platform.YelpFusion);
+  const redditVolSig = byPlatform.get(Platform.RedditVolume);
+
+  // Keyword Planner: show actual monthly searches
+  if (kwpSig && kwpSig.currentIntensity > 0) {
+    const searches = kwpSig.rawCounts?.monthlySearches;
+    const comp = kwpSig.rawCounts?.competition;
+    const cpc = kwpSig.rawCounts?.cpcCents;
+    const searchStr = searches != null ? `~${Number(searches).toLocaleString()} searches/month` : `intensity ${kwpSig.currentIntensity}/100`;
+    const compStr = comp != null ? ` Competition: ${comp}/100.` : '';
+    const cpcStr = cpc != null && Number(cpc) > 0 ? ` Avg CPC: $${(Number(cpc) / 100).toFixed(2)}.` : '';
+    evidence.push(`Google Keyword Planner (absolute): ${searchStr} in target region.${compStr}${cpcStr}`);
+  }
+
+  // Yelp Fusion: show open competitor count + avg rating
+  if (yelpFusionSig && yelpFusionSig.currentIntensity > 0) {
+    const open = yelpFusionSig.rawCounts?.openCompetitors ?? 0;
+    const total = yelpFusionSig.rawCounts?.totalResults ?? 0;
+    const rating = yelpFusionSig.rawCounts?.avgRating;
+    const ratingStr = rating && Number(rating) > 0 ? `, avg rating ${rating}★` : '';
+    evidence.push(`Yelp Places API (direct): ${open} open competitor${open !== 1 ? 's' : ''} found (${total} total results)${ratingStr}. Supply quality: ${yelpFusionSig.supplyQuality ?? '--'}/100.`);
+  }
+
+  // Reddit Volume: show actual post counts
+  if (redditVolSig && redditVolSig.currentIntensity > 0) {
+    const p7 = Number(redditVolSig.rawCounts?.postsLast7d ?? 0);
+    const p30 = Number(redditVolSig.rawCounts?.postsLast30d ?? 0);
+    const q = Number(redditVolSig.rawCounts?.questionPosts ?? 0);
+    const accel = redditVolSig.rawCounts?.accelerating === 1;
+    evidence.push(`Reddit volume: ${p7} posts/7d, ${p30} posts/30d${q > 0 ? `, ${q} question posts ("where can I find...")` : ''}${accel ? ' — accelerating ↑' : ''}.`);
+  }
+
+  // ── Surge analysis (computed from all signals, no API call) ─────────────
+  const surge = computeSurge(signals.map(s => ({ ...s, weight: undefined })));
+  if (surge.surgeScore > 0) {
+    evidence.push(`Surge analysis: ${surge.surgeLabel} (${surge.surgeScore}/100) — ${surge.rationale}`);
+  }
+
+  // ── Original evidence ────────────────────────────────────────────────────
   evidence.push(`Intent ${scores.intentScore}/100 from search and cross-platform demand signals.`);
-  evidence.push(`Availability ${scores.availabilityScore}/100 from SerpAPI Yelp+Maps local supply.`);
+
+  // Use Yelp Fusion supply note if available, fall back to SerpAPI Yelp
+  const supplySource = (yelpFusionSig && yelpFusionSig.currentIntensity > 0) ? 'Yelp Places API (direct) + Maps' : 'SerpAPI Yelp+Maps';
+  evidence.push(`Availability ${scores.availabilityScore}/100 from ${supplySource} local supply.`);
   evidence.push(`Realization ${scores.realizationScore}/100 from owned sales/traffic signals.`);
   evidence.push(`Gap ${scores.gapScore}/100 indicates unserved demand in current local supply.`);
 
   const convSearch = byPlatform.get(Platform.ConversationalSearch)?.currentIntensity || 0;
   const localRedditIntent = byPlatform.get(Platform.LocalRedditIntent)?.currentIntensity || 0;
 
-  if (google > 0) evidence.push(`Google Trends local interest signal: ${google}/100.`);
+  if (google > 0) evidence.push(`Google Trends local interest signal: ${google}/100 (relative index, not absolute).`);
   if (yelp > 0 || maps > 0) {
     const yelpSig = byPlatform.get(Platform.Yelp);
     const mapsSig = byPlatform.get(Platform.GoogleMaps);
     const qualityNote = (yelpSig?.supplyQuality != null || mapsSig?.supplyQuality != null)
       ? ` Competitive quality index: Yelp ${yelpSig?.supplyQuality ?? '--'}/100, Maps ${mapsSig?.supplyQuality ?? '--'}/100.`
       : '';
-    evidence.push(`Local listings density (Yelp ${yelp}, Maps ${maps}).${qualityNote}`);
+    evidence.push(`SerpAPI local listings (Yelp ${yelp}/100, Maps ${maps}/100).${qualityNote}`);
   }
   if (sales > 0) evidence.push(`Observed in-store/online sales proxy present (${sales}/100).`);
   if (backtest > 0) evidence.push(`GA4 backtest prior provides calibration context (${backtest}/100).`);
@@ -643,6 +721,80 @@ async function fetchLocalRedditIntent(term: string, context: LocationContext): P
     return { platform: Platform.LocalRedditIntent, currentIntensity, velocity, history: [] };
   } catch { return { platform: Platform.LocalRedditIntent, currentIntensity: 0, velocity: 0, history: [] }; }
 }
+
+// ── New high-quality signal fetchers ────────────────────────────────────────
+
+async function fetchKeywordPlannerSignal(term: string, context: LocationContext): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.KeywordPlanner, currentIntensity: 0, velocity: 0, history: [], rawCounts: {} };
+  try {
+    const result = await getKeywordVolume(term);
+    if (result.monthlySearches == null) return empty;
+    const intensity = keywordVolumeToIntensity(result.monthlySearches);
+    return {
+      platform: Platform.KeywordPlanner,
+      currentIntensity: intensity,
+      velocity: 0, // Keyword Planner gives 12-month average — no real-time velocity
+      history: [],
+      rawCounts: {
+        monthlySearches: result.monthlySearches,
+        competition: result.competition ?? 'N/A',
+        cpcCents: result.cpcCents ?? 0,
+      },
+    };
+  } catch { return empty; }
+}
+
+async function fetchYelpFusionSignal(term: string, context: LocationContext): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.YelpFusion, currentIntensity: 0, velocity: 0, history: [], rawCounts: {} };
+  const YELP_API_KEY = process.env.YELP_API_KEY;
+  if (!YELP_API_KEY) return empty;
+  try {
+    const location = context.hasZip ? `${context.zipCode}, USA` : (process.env.DEFAULT_REGION_LABEL || 'Minneapolis, MN');
+    const result = await fetchYelpFusion(term, location);
+    if (!result.specificCount && !result.total) return empty;
+    const intensity = yelpCountToIntensity(result.specificCount, true);
+    return {
+      platform: Platform.YelpFusion,
+      currentIntensity: intensity,
+      velocity: 0,
+      history: [],
+      supplyQuality: result.supplyQuality,
+      rawCounts: {
+        openCompetitors: result.specificCount,
+        totalResults: result.total,
+        avgRating: result.avgRating,
+      },
+    };
+  } catch { return empty; }
+}
+
+async function fetchRedditVolumeSignal(term: string): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.RedditVolume, currentIntensity: 0, velocity: 0, history: [], rawCounts: {} };
+  try {
+    const result = await getRedditVolume(term);
+    if (result.last7d === 0 && result.last30d === 0) return empty;
+    const velocity = Math.max(-20, Math.min(20, Math.round(result.dailyVelocity * 3)));
+    return {
+      platform: Platform.RedditVolume,
+      currentIntensity: result.intensity,
+      velocity,
+      history: [
+        { week: 1, value: Math.round(result.last90d / 4) },  // weekly avg from 90d
+        { week: 2, value: Math.round(result.last90d / 4) },
+        { week: 3, value: Math.round(result.last30d / 3) },  // weekly avg from 30d
+        { week: 4, value: Math.round(result.last7d) },       // actual last 7d
+      ],
+      rawCounts: {
+        postsLast7d: result.last7d,
+        postsLast30d: result.last30d,
+        questionPosts: result.questionPosts,
+        accelerating: result.isAccelerating ? 1 : 0,
+      },
+    };
+  } catch { return empty; }
+}
+
+// ── End new fetchers ─────────────────────────────────────────────────────────
 
 async function fetchSquareSales(term: string): Promise<SignalData> {
   if (!SQUARE_ACCESS_TOKEN) return { platform: Platform.OwnSales, currentIntensity: 0, velocity: 0, history: [] };
@@ -1150,7 +1302,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('x-trendhunt-serpapi-primary', 'true');
 
     const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
-      const [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps] = await Promise.all([
+      const [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps, kwp, yelpFusion, redditVolume] = await Promise.all([
         fetchYelp(item.term, location),
         fetchReddit(item.term, location),
         fetchSerpTrends(item.term, location),
@@ -1167,14 +1319,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fetchYouTube(item.term, location),
         fetchGoogleNews(item.term, location),
         fetchGoogleMaps(item.term, location),
+        fetchKeywordPlannerSignal(item.term, location),
+        fetchYelpFusionSignal(item.term, location),
+        fetchRedditVolumeSignal(item.term),
       ]);
 
-      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps];
+      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps, kwp, yelpFusion, redditVolume];
       const components = scoreTrend(signals, location.hasZip);
       const ds = components.intentScore;
       const ss = components.availabilityScore;
       const ud = components.gapScore;
       const bp = breakoutProb(signals, components);
+
+      // Build raw counts snapshot for persistence + UI
+      const surge = computeSurge(signals.map(s => ({ ...s, weight: undefined })));
+      const signalRawCounts = {
+        monthlySearches: kwp.rawCounts?.monthlySearches ?? null,
+        kwpCompetition: kwp.rawCounts?.competition ?? null,
+        kwpCpcCents: kwp.rawCounts?.cpcCents ?? null,
+        yelpOpenCompetitors: yelpFusion.rawCounts?.openCompetitors ?? null,
+        yelpTotalResults: yelpFusion.rawCounts?.totalResults ?? null,
+        yelpAvgRating: yelpFusion.rawCounts?.avgRating ?? null,
+        redditPostsLast7d: redditVolume.rawCounts?.postsLast7d ?? null,
+        redditPostsLast30d: redditVolume.rawCounts?.postsLast30d ?? null,
+        redditQuestionPosts: redditVolume.rawCounts?.questionPosts ?? null,
+        redditAccelerating: (redditVolume.rawCounts?.accelerating === 1) || false,
+        surgeScore: surge.surgeScore,
+        surgeLabel: surge.surgeLabel,
+        surgeCorroborating: surge.corroboratingSignals,
+        updatedAt: new Date().toISOString(),
+      };
 
       // Persist
       let trendId = item.id || '';
@@ -1188,6 +1362,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               region: location.regionLabel,
               neighborhood: item.neighborhood,
               last_updated: new Date().toISOString(),
+              signal_raw_counts: signalRawCounts,
             }, { onConflict: 'term' })
             .select().single();
           if (row) {
@@ -1311,6 +1486,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         trendStateNarrative,
         conversionDeficitScore,
         funnelData,
+        signalRawCounts,
+        surgeScore: surge.surgeScore,
+        surgeLabel: surge.surgeLabel,
       };
     });
 

@@ -73,6 +73,10 @@ export interface TrendEntity {
   // Module 5: Funnel attribution
   conversionDeficitScore?: number;
   funnelData?: TermFunnel;
+  // Raw source counts (absolute numbers behind each score)
+  signalRawCounts?: Record<string, number | string | boolean | null>;
+  surgeScore?: number;
+  surgeLabel?: string;
 }
 
 export interface GeoRegion {

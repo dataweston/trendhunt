@@ -51,6 +51,10 @@
     "api/analyze-trend.ts": {
       "memory": 256,
       "maxDuration": 15
+    },
+    "api/calibrate.ts": {
+      "memory": 256,
+      "maxDuration": 15
     }
   },
   "crons": [
