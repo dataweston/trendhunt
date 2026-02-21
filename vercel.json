@@ -4,58 +4,17 @@
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/trends.ts": {
-      "memory": 1024,
-      "maxDuration": 30
-    },
-    "api/discover.ts": {
-      "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/queue.ts": {
-      "memory": 256,
-      "maxDuration": 10
-    },
-    "api/generate-page.ts": {
-      "memory": 512,
-      "maxDuration": 30
-    },
-    "api/meta-ads.ts": {
-      "memory": 512,
-      "maxDuration": 15
-    },
-    "api/meta-sync.ts": {
-      "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/meta-webhook.ts": {
-      "memory": 256,
-      "maxDuration": 10
-    },
-    "api/ga4-backtest.ts": {
-      "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/cron-score.ts": {
-      "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/ga4-funnel.ts": {
-      "memory": 512,
-      "maxDuration": 30
-    },
-    "api/evaluate-launches.ts": {
-      "memory": 256,
-      "maxDuration": 15
-    },
-    "api/analyze-trend.ts": {
-      "memory": 256,
-      "maxDuration": 15
-    },
-    "api/calibrate.ts": {
-      "memory": 256,
-      "maxDuration": 15
-    }
+    "api/trends.ts":         { "maxDuration": 30 },
+    "api/discover.ts":       { "maxDuration": 60 },
+    "api/generate-page.ts":  { "maxDuration": 30 },
+    "api/meta-ads.ts":       { "maxDuration": 15 },
+    "api/meta-sync.ts":      { "maxDuration": 60 },
+    "api/ga4-backtest.ts":   { "maxDuration": 60 },
+    "api/cron-score.ts":     { "maxDuration": 60 },
+    "api/ga4-funnel.ts":     { "maxDuration": 30 },
+    "api/evaluate-launches.ts": { "maxDuration": 15 },
+    "api/analyze-trend.ts":  { "maxDuration": 15 },
+    "api/calibrate.ts":      { "maxDuration": 15 }
   },
   "crons": [
     {
