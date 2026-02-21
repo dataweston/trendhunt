@@ -25,8 +25,6 @@ This project is no longer mock-data only. The ingestion path is already live:
 - `GET|POST /api/meta-sync`
   - Syncs historical/incremental Meta Ads and Instagram data into Supabase
   - Writes to `meta_sync_runs`, `meta_ads_*`, `ig_*` tables
-- `GET|POST /api/meta-analyze`
-  - Processes `meta_analysis_queue` and writes permanent reports to `meta_analysis_reports`
 - `GET|POST /api/meta-webhook`
   - Handles Instagram webhook verification and event ingestion
 - `GET /api/ga4-backtest`

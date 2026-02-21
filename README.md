@@ -62,7 +62,6 @@ Trend Hunter is a ZIP-first food trend intelligence dashboard. It discovers emer
 - `POST /api/generate-page` - generate page draft for a tracked trend (authenticated)
 - `GET|POST /api/meta-ads` - read or create Meta campaign drafts (authenticated)
 - `GET|POST /api/meta-sync` - backfill or incremental sync for Meta Ads + Instagram (authenticated/cron)
-- `GET|POST /api/meta-analyze` - process queued deep analysis jobs for Meta inbound/outbound data
 - `GET|POST /api/meta-webhook` - Instagram webhook verification + event intake
 - `GET /api/ga4-backtest` - mine historical GA4 terms and queue candidates (authenticated)
 
