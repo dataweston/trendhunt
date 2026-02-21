@@ -10,6 +10,7 @@ export enum Platform {
   OwnTraffic = 'OwnTraffic',
   GA4Backtest = 'GA4Backtest',
   MetaAds = 'MetaAds',
+  InstagramOrganic = 'InstagramOrganic',
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
   GoogleMaps = 'GoogleMaps',

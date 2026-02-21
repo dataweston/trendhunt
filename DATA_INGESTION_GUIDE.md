@@ -22,6 +22,13 @@ This project is no longer mock-data only. The ingestion path is already live:
   - Review and approve/reject discovered terms
 - `POST /api/generate-page`
   - Generates and stores product page drafts for tracked trends
+- `GET|POST /api/meta-sync`
+  - Syncs historical/incremental Meta Ads and Instagram data into Supabase
+  - Writes to `meta_sync_runs`, `meta_ads_*`, `ig_*` tables
+- `GET|POST /api/meta-analyze`
+  - Processes `meta_analysis_queue` and writes permanent reports to `meta_analysis_reports`
+- `GET|POST /api/meta-webhook`
+  - Handles Instagram webhook verification and event ingestion
 - `GET /api/ga4-backtest`
   - Mines 3 years of GA4 history for keyword trend candidates
   - Feeds an explicit GA4 backtest signal into live trend scoring
@@ -44,6 +51,11 @@ Optional sources:
 - `GOOGLE_SERVICE_ACCOUNT_KEY`
 - `FACEBOOK_ACCESS_TOKEN`
 - `FACEBOOK_AD_ACCOUNT_ID`
+- `FACEBOOK_PAGE_ID`
+- `INSTAGRAM_BUSINESS_ACCOUNT_ID` or `INSTAGRAM_IG_USER_ID`
+- `META_WEBHOOK_VERIFY_TOKEN`
+- `META_ANALYZER_PROVIDER` (`auto|openai|anthropic|gemini`)
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (optional deep analyzer providers)
 - `DEFAULT_REGION_LABEL` / `DEFAULT_QUERY_HINT` / `DEFAULT_SERP_GEO` (location defaults)
 - `DISCOVERY_REDDIT_SUBS` (comma-separated enrichment subreddits)
 

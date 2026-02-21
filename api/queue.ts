@@ -35,10 +35,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json(data || []);
   }
 
-  // POST: approve or reject
+  // POST: approve, reject, or direct_track
   if (req.method === 'POST') {
-    const { id, action, category, neighborhood, region } = req.body || {};
-    if (!id || !action) return res.status(400).json({ error: 'id and action required' });
+    const { id, action, term: bodyTerm, category, neighborhood, region } = req.body || {};
+    if (!action) return res.status(400).json({ error: 'action required' });
+
+    // Direct track: upsert into trends table immediately, bypassing the queue
+    if (action === 'direct_track') {
+      if (!bodyTerm) return res.status(400).json({ error: 'term required for direct_track' });
+      const resolvedCategory = category || 'Uncategorized';
+      const { data: trendRow, error: insertError } = await supabase.from('trends').upsert({
+        term: bodyTerm,
+        category: resolvedCategory,
+        neighborhood: neighborhood || 'Unknown',
+        region: region || DEFAULT_REGION_LABEL,
+      }, { onConflict: 'term' }).select('id').single();
+
+      if (insertError) return res.status(500).json({ error: insertError.message });
+
+      if (trendRow?.id) {
+        try {
+          await supabase.from('launch_decisions').insert({
+            term: bodyTerm,
+            trend_id: trendRow.id,
+            outcome: 'pending',
+          });
+        } catch (e) {
+          console.error('launch_decisions insert failed (non-fatal):', e);
+        }
+      }
+
+      return res.status(200).json({ ok: true, action: 'direct_track', term: bodyTerm });
+    }
+
+    if (!id) return res.status(400).json({ error: 'id required' });
 
     if (action === 'approve') {
       // Get the queue item

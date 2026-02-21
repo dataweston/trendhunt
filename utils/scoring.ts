@@ -11,6 +11,7 @@ const PLATFORM_WEIGHTS: Record<Platform, number> = {
   [Platform.Pinterest]: 1.2,    // Visual interest / planning (Demand)
   [Platform.GoogleSearch]: 1.0,  // General intent
   [Platform.MetaAds]: 0.8,      // Ad performance feedback
+  [Platform.InstagramOrganic]: 0.9, // Organic social engagement calibration
   [Platform.ConversationalSearch]: 1.2, // "near me" search intent — latent demand without local supply
   [Platform.LocalRedditIntent]: 1.3,   // Local community question posts — active seeking without finding
   [Platform.Yelp]: 0.5,         // Established supply (Supply indicator)
@@ -36,6 +37,7 @@ const DEMAND_PLATFORMS = new Set<Platform>([
   Platform.GoogleSearch,
   Platform.DoorDash,
   Platform.MetaAds,
+  Platform.InstagramOrganic,
   Platform.ConversationalSearch,
   Platform.LocalRedditIntent,
 ]);
@@ -164,3 +166,4 @@ export const predictBreakoutWeek = (
   const weeksToThreshold = Math.ceil((threshold - currentUnmetDemand) / slope);
   return Math.min(52, Math.max(1, weeksToThreshold));
 };
+

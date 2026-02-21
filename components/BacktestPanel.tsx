@@ -66,6 +66,29 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
   const [adminTokenInput, setAdminTokenInput] = useState(() => getStoredAdminToken());
   const [authNotice, setAuthNotice] = useState('');
   const [debugInfo, setDebugInfo] = useState<any>(null);
+  const [trackedTerms, setTrackedTerms] = useState<Set<string>>(new Set());
+  const [trackingTerm, setTrackingTerm] = useState<string | null>(null);
+
+  const trackTerm = useCallback(async (term: string, category: string) => {
+    setTrackingTerm(term);
+    try {
+      const res = await fetch('/api/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
+        body: JSON.stringify({ action: 'direct_track', term, category }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `API ${res.status}`);
+      }
+      setTrackedTerms((prev: Set<string>) => new Set(prev).add(term));
+      if (onApproved) onApproved();
+    } catch (e: any) {
+      setError(`Track failed for "${term}": ${e.message}`);
+    } finally {
+      setTrackingTerm(null);
+    }
+  }, [onApproved]);
 
   const saveAdminToken = () => {
     setStoredAdminToken(adminTokenInput);
@@ -286,6 +309,19 @@ export function BacktestPanel({ onApproved }: { onApproved?: () => void }) {
                     </div>
                     <div className="text-[10px] text-slate-500">score</div>
                   </div>
+
+                  {/* Track button */}
+                  <button
+                    onClick={(e: React.MouseEvent) => { e.stopPropagation(); trackTerm(c.term, 'GA4 Backtest'); }}
+                    disabled={trackedTerms.has(c.term) || trackingTerm === c.term}
+                    className={`shrink-0 px-2.5 py-1 text-[10px] font-medium rounded transition-colors ${
+                      trackedTerms.has(c.term)
+                        ? 'bg-emerald-900/40 text-emerald-400 cursor-default'
+                        : 'bg-slate-700 hover:bg-emerald-700 text-slate-300 hover:text-white'
+                    } disabled:cursor-not-allowed`}
+                  >
+                    {trackingTerm === c.term ? '...' : trackedTerms.has(c.term) ? 'Tracked ✓' : 'Track'}
+                  </button>
 
                   {/* Expand arrow */}
                   <ArrowRight size={14} className={`text-slate-600 transition-transform ${expandedTerm === c.term ? 'rotate-90' : ''}`} />

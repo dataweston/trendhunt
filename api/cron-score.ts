@@ -98,7 +98,7 @@ const WEIGHTS: Record<string, number> = {
   OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 0.8,
   GoogleSearch: 2.8, DoorDash: 1.3, Reddit: 1.0,
   TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
-  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, RedditPushshift: 0.3,
+  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.9, InstagramOrganic: 0.9, RedditPushshift: 0.3,
   ConversationalSearch: 1.2, LocalRedditIntent: 1.3,
 };
 

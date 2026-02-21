@@ -16,6 +16,7 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
   const [scanResult, setScanResult] = useState<string | null>(null);
   const [adminTokenInput, setAdminTokenInput] = useState(() => getStoredAdminToken());
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [lastCronRun, setLastCronRun] = useState<Date | null>(null);
 
   const fetchQueue = async () => {
     setLoading(true);
@@ -32,7 +33,22 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
     setLoading(false);
   };
 
-  useEffect(() => { fetchQueue(); }, []);
+  useEffect(() => {
+    fetchQueue();
+    // Fetch last cron-sourced discovery_queue item to determine last auto-discovery time
+    (async () => {
+      try {
+        const res = await fetch('/api/queue?status=pending&limit=200', { headers: getAdminHeaders() });
+        if (res.ok) {
+          const rows: { created_at: string; source?: string }[] = await res.json();
+          const cronRow = rows
+            .filter(r => /cron|gemini|discover/i.test(r.source || ''))
+            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+          if (cronRow) setLastCronRun(new Date(cronRow.created_at));
+        }
+      } catch { /* ignore */ }
+    })();
+  }, []);
 
   const scanZip = async () => {
     const zip = zipCode.trim();
@@ -107,6 +123,14 @@ export const DiscoveryQueue: React.FC<DiscoveryQueueProps> = ({ onApproved }) =>
 
   return (
     <div className="space-y-6">
+      {/* Cron status bar */}
+      <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border text-xs ${lastCronRun ? 'bg-emerald-950/30 border-emerald-500/20 text-emerald-300' : 'bg-slate-800/30 border-slate-700 text-slate-400'}`}>
+        <Sparkles size={13} className={lastCronRun ? 'text-emerald-400' : 'text-slate-500'} />
+        {lastCronRun
+          ? <>Auto-discovery last ran: <span className="font-medium">{lastCronRun.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} at {lastCronRun.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>. Next run: daily at 6 AM UTC.</>
+          : 'Auto-discovery runs daily at 6 AM UTC. Scan a ZIP code below to discover terms now.'}
+      </div>
+
       <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
         <h3 className="text-sm font-medium text-white mb-3">Admin Token</h3>
         <div className="flex gap-2">

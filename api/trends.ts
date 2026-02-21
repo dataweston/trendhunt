@@ -19,6 +19,7 @@ enum Platform {
   OwnTraffic = 'OwnTraffic',
   GA4Backtest = 'GA4Backtest',
   MetaAds = 'MetaAds',
+  InstagramOrganic = 'InstagramOrganic',
   YouTube = 'YouTube',
   GoogleNews = 'GoogleNews',
   GoogleMaps = 'GoogleMaps',
@@ -141,7 +142,7 @@ const WEIGHTS: Record<string, number> = {
   OwnSales: 3.2, OwnTraffic: 1.4, GA4Backtest: 0.8,
   GoogleSearch: 2.8, DoorDash: 1.3, Reddit: 1.0,
   TikTok: 1.1, YouTube: 1.0, GoogleNews: 0.8, Pinterest: 0.6,
-  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.7, RedditPushshift: 0.3,
+  Yelp: 2.0, GoogleMaps: 2.2, MetaAds: 0.9, InstagramOrganic: 0.9, RedditPushshift: 0.3,
   ConversationalSearch: 1.2, LocalRedditIntent: 1.3,
 };
 const SUPPLY = new Set<Platform>([Platform.Yelp, Platform.GoogleMaps]);
@@ -212,6 +213,8 @@ const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): numbe
   const hasSales = activeSignals.some((s) => s.platform === Platform.OwnSales);
   const hasTraffic = activeSignals.some((s) => s.platform === Platform.OwnTraffic);
   const hasBacktest = activeSignals.some((s) => s.platform === Platform.GA4Backtest);
+  const hasMetaAds = activeSignals.some((s) => s.platform === Platform.MetaAds);
+  const hasInstagramOrganic = activeSignals.some((s) => s.platform === Platform.InstagramOrganic);
 
   let score = 20;
   score += activeSignals.length * 4;
@@ -219,6 +222,8 @@ const calculateConfidenceScore = (signals: SignalData[], hasZip: boolean): numbe
   if (hasSales) score += 15;
   if (hasTraffic) score += 8;
   if (hasBacktest) score += 4;
+  if (hasMetaAds) score += 3;
+  if (hasInstagramOrganic) score += 3;
   if (hasZip) score += 5;
   return clampScore(score);
 };
@@ -244,6 +249,8 @@ const buildEvidence = (
   const yelp = byPlatform.get(Platform.Yelp)?.currentIntensity || 0;
   const maps = byPlatform.get(Platform.GoogleMaps)?.currentIntensity || 0;
   const backtest = byPlatform.get(Platform.GA4Backtest)?.currentIntensity || 0;
+  const metaAds = byPlatform.get(Platform.MetaAds)?.currentIntensity || 0;
+  const instagramOrganic = byPlatform.get(Platform.InstagramOrganic)?.currentIntensity || 0;
 
   evidence.push(`Intent ${scores.intentScore}/100 from search and cross-platform demand signals.`);
   evidence.push(`Availability ${scores.availabilityScore}/100 from SerpAPI Yelp+Maps local supply.`);
@@ -264,6 +271,8 @@ const buildEvidence = (
   }
   if (sales > 0) evidence.push(`Observed in-store/online sales proxy present (${sales}/100).`);
   if (backtest > 0) evidence.push(`GA4 backtest prior provides calibration context (${backtest}/100).`);
+  if (metaAds > 0) evidence.push(`Meta paid performance signal present (${metaAds}/100), used as realization calibration.`);
+  if (instagramOrganic > 0) evidence.push(`Instagram organic engagement signal present (${instagramOrganic}/100), used as demand calibration.`);
   if (convSearch > 0) evidence.push(`Question-form search interest ("near me"): ${convSearch}/100 — latent demand without local supply.`);
   if (localRedditIntent > 0) evidence.push(`Local community question posts: ${localRedditIntent}/100 — people actively seeking but not finding locally.`);
   if (scores.serpapiShare > 0) evidence.push(`SerpAPI contributes ${scores.serpapiShare}% of active signal intensity.`);
@@ -904,6 +913,180 @@ async function fetchGA4BacktestSignal(term: string): Promise<SignalData> {
   }
 }
 
+function toDateKey(value: unknown): string {
+  const s = String(value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+}
+
+function dayBucketOffset(dateKey: string): number {
+  if (!dateKey) return Number.MAX_SAFE_INTEGER;
+  const now = new Date();
+  const d = new Date(`${dateKey}T00:00:00.000Z`);
+  return Math.floor((now.getTime() - d.getTime()) / 86400000);
+}
+
+async function fetchMetaAdsSignal(term: string): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.MetaAds, currentIntensity: 0, velocity: 0, history: [] };
+  if (!supabase) return empty;
+
+  try {
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 35);
+    const fromIso = fromDate.toISOString().slice(0, 10);
+
+    let query = supabase
+      .from('meta_ads_insights_daily')
+      .select('entity_name,date_start,spend,impressions,clicks,ctr,purchase_count,add_to_cart_count,initiate_checkout_count')
+      .gte('date_start', fromIso)
+      .order('date_start', { ascending: false })
+      .limit(400);
+
+    if (term.trim()) query = query.ilike('entity_name', `%${term}%`);
+    const { data } = await query;
+    const rows = data || [];
+    if (!rows.length) return empty;
+
+    let impressions = 0;
+    let clicks = 0;
+    let purchases = 0;
+    let addToCart = 0;
+    let avgCtrAcc = 0;
+    let ctrRows = 0;
+
+    let recentValue = 0;
+    let priorValue = 0;
+
+    for (const row of rows) {
+      const imps = Number(row.impressions || 0);
+      const clk = Number(row.clicks || 0);
+      const pur = Number(row.purchase_count || 0);
+      const atc = Number(row.add_to_cart_count || 0);
+      const ctr = Number(row.ctr || 0);
+
+      impressions += imps;
+      clicks += clk;
+      purchases += pur;
+      addToCart += atc;
+      if (ctr > 0) {
+        avgCtrAcc += ctr;
+        ctrRows += 1;
+      }
+
+      const value = clk + pur * 4 + atc * 2;
+      const ageDays = dayBucketOffset(toDateKey(row.date_start));
+      if (ageDays <= 7) recentValue += value;
+      else if (ageDays <= 14) priorValue += value;
+    }
+
+    const avgCtr = ctrRows > 0 ? avgCtrAcc / ctrRows : (impressions > 0 ? (clicks / impressions) * 100 : 0);
+    const clickScale = Math.min(35, Math.log10(clicks + 1) * 20);
+    const purchaseScale = Math.min(35, Math.log10(purchases + addToCart + 1) * 20);
+    const ctrScale = Math.min(30, avgCtr * 6);
+    const intensity = clampScore(clickScale + purchaseScale + ctrScale);
+
+    let velocity = 0;
+    if (priorValue > 0) {
+      velocity = Math.round(((recentValue - priorValue) / priorValue) * 20);
+    } else if (recentValue > 0) {
+      velocity = 10;
+    }
+    velocity = Math.max(-20, Math.min(20, velocity));
+
+    return {
+      platform: Platform.MetaAds,
+      currentIntensity: intensity,
+      velocity,
+      history: [],
+    };
+  } catch {
+    return empty;
+  }
+}
+
+async function fetchInstagramOrganicSignal(term: string): Promise<SignalData> {
+  const empty: SignalData = { platform: Platform.InstagramOrganic, currentIntensity: 0, velocity: 0, history: [] };
+  if (!supabase) return empty;
+
+  try {
+    const { data: mediaRows } = await supabase
+      .from('ig_media')
+      .select('media_id, caption')
+      .ilike('caption', `%${term}%`)
+      .order('media_timestamp', { ascending: false })
+      .limit(80);
+
+    const mediaIds = (mediaRows || []).map((row: any) => String(row.media_id || '')).filter(Boolean);
+    if (!mediaIds.length) return empty;
+
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 35);
+    const fromIso = fromDate.toISOString().slice(0, 10);
+
+    const { data: insightRows } = await supabase
+      .from('ig_media_insights_daily')
+      .select('snapshot_date,reach,impressions,likes,comments,saves,shares')
+      .in('media_id', mediaIds)
+      .gte('snapshot_date', fromIso)
+      .order('snapshot_date', { ascending: false })
+      .limit(600);
+
+    const rows = insightRows || [];
+    if (!rows.length) return empty;
+
+    let totalReach = 0;
+    let totalImpressions = 0;
+    let totalEngagement = 0;
+    let totalSavesShares = 0;
+    let recentEngagement = 0;
+    let priorEngagement = 0;
+
+    for (const row of rows) {
+      const reach = Number(row.reach || 0);
+      const impressions = Number(row.impressions || 0);
+      const likes = Number(row.likes || 0);
+      const comments = Number(row.comments || 0);
+      const saves = Number(row.saves || 0);
+      const shares = Number(row.shares || 0);
+      const engagement = likes + comments + saves + shares;
+
+      totalReach += reach;
+      totalImpressions += impressions;
+      totalEngagement += engagement;
+      totalSavesShares += (saves + shares);
+
+      const ageDays = dayBucketOffset(toDateKey(row.snapshot_date));
+      if (ageDays <= 7) recentEngagement += engagement;
+      else if (ageDays <= 14) priorEngagement += engagement;
+    }
+
+    const base = Math.max(totalReach, totalImpressions, 1);
+    const engagementRate = totalEngagement / base;
+    const saveShareRate = totalSavesShares / base;
+
+    const rateScore = Math.min(45, engagementRate * 900);
+    const depthScore = Math.min(35, Math.log10(totalEngagement + 1) * 20);
+    const intentScore = Math.min(20, saveShareRate * 700);
+    const intensity = clampScore(rateScore + depthScore + intentScore);
+
+    let velocity = 0;
+    if (priorEngagement > 0) {
+      velocity = Math.round(((recentEngagement - priorEngagement) / priorEngagement) * 20);
+    } else if (recentEngagement > 0) {
+      velocity = 8;
+    }
+    velocity = Math.max(-20, Math.min(20, velocity));
+
+    return {
+      platform: Platform.InstagramOrganic,
+      currentIntensity: intensity,
+      velocity,
+      history: [],
+    };
+  } catch {
+    return empty;
+  }
+}
+
 // ========== SUPABASE HELPERS ==========
 
 async function getHistory(trendId: string, limit = 12) {
@@ -967,7 +1150,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('x-trendhunt-serpapi-primary', 'true');
 
     const trends: TrendEntity[] = await mapWithConcurrency(terms, TERM_PROCESS_CONCURRENCY, async (item) => {
-      const [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, youtube, news, maps] = await Promise.all([
+      const [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps] = await Promise.all([
         fetchYelp(item.term, location),
         fetchReddit(item.term, location),
         fetchSerpTrends(item.term, location),
@@ -979,12 +1162,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fetchSquareSales(item.term),
         fetchGA4Traffic(item.term),
         fetchGA4BacktestSignal(item.term),
+        fetchMetaAdsSignal(item.term),
+        fetchInstagramOrganicSignal(item.term),
         fetchYouTube(item.term, location),
         fetchGoogleNews(item.term, location),
         fetchGoogleMaps(item.term, location),
       ]);
 
-      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, youtube, news, maps];
+      const signals = [yelp, reddit, google, tiktok, pinterest, delivery, convSearch, localRedditIntent, sales, traffic, backtest, metaAds, instagramOrganic, youtube, news, maps];
       const components = scoreTrend(signals, location.hasZip);
       const ds = components.intentScore;
       const ss = components.availabilityScore;
@@ -1139,5 +1324,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(500).json({ error: 'Failed to fetch trends' });
   }
 }
-
-

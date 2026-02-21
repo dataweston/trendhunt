@@ -29,6 +29,16 @@ Trend Hunter is a ZIP-first food trend intelligence dashboard. It discovers emer
      - `DEFAULT_REGION_LABEL` (default: `United States`)
      - `DEFAULT_QUERY_HINT` (used when no ZIP is provided)
      - `DEFAULT_SERP_GEO` (default: `US`)
+   - Optional Meta/Instagram integration:
+     - `FACEBOOK_ACCESS_TOKEN`
+     - `FACEBOOK_AD_ACCOUNT_ID`
+     - `FACEBOOK_PAGE_ID`
+     - `INSTAGRAM_BUSINESS_ACCOUNT_ID` (or `INSTAGRAM_IG_USER_ID`)
+     - `META_WEBHOOK_VERIFY_TOKEN`
+   - Optional deep analyzer providers:
+     - `META_ANALYZER_PROVIDER=auto|openai|anthropic|gemini`
+     - `OPENAI_API_KEY`
+     - `ANTHROPIC_API_KEY`
 3. Start app:
    `npm run dev`
 
@@ -51,6 +61,9 @@ Trend Hunter is a ZIP-first food trend intelligence dashboard. It discovers emer
 - `GET|POST /api/queue` - review/approve discovered terms (authenticated)
 - `POST /api/generate-page` - generate page draft for a tracked trend (authenticated)
 - `GET|POST /api/meta-ads` - read or create Meta campaign drafts (authenticated)
+- `GET|POST /api/meta-sync` - backfill or incremental sync for Meta Ads + Instagram (authenticated/cron)
+- `GET|POST /api/meta-analyze` - process queued deep analysis jobs for Meta inbound/outbound data
+- `GET|POST /api/meta-webhook` - Instagram webhook verification + event intake
 - `GET /api/ga4-backtest` - mine historical GA4 terms and queue candidates (authenticated)
 
 ## Admin Auth

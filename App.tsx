@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useCallback, Suspense, lazy } from 'react';
-import { LayoutDashboard, Map, Activity, Search, Bell, Loader2, AlertCircle, Inbox, RefreshCw, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, Activity, Search, Bell, Loader2, AlertCircle, Inbox, RefreshCw, BarChart3, TrendingUp } from 'lucide-react';
 import { trendService } from './services/trendService';
 import { TrendEntity } from './types';
 
 const OpportunityTable = lazy(() => import('./components/OpportunityTable').then((m) => ({ default: m.OpportunityTable })));
 const TrendDetail = lazy(() => import('./components/TrendDetail').then((m) => ({ default: m.TrendDetail })));
 const PropagationGraph = lazy(() => import('./components/Visualizations').then((m) => ({ default: m.PropagationGraph })));
-const GeoMap = lazy(() => import('./components/GeoMap').then((m) => ({ default: m.GeoMap })));
 const DiscoveryQueue = lazy(() => import('./components/DiscoveryQueue').then((m) => ({ default: m.DiscoveryQueue })));
 const BacktestPanel = lazy(() => import('./components/BacktestPanel').then((m) => ({ default: m.BacktestPanel })));
 
@@ -19,7 +18,7 @@ const App = () => {
   const [zipCode, setZipCode] = useState('');
   const [activeSearch, setActiveSearch] = useState(''); // committed search
   const [activeZip, setActiveZip] = useState(''); // committed zip scope
-  const [activeNav, setActiveNav] = useState<'dashboard' | 'geo' | 'queue' | 'backtest'>('dashboard');
+  const [activeNav, setActiveNav] = useState<'dashboard' | 'queue' | 'backtest' | 'alerts'>('dashboard');
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const loadData = useCallback(async (query = '', zip = '', forceRefresh = false) => {
@@ -84,10 +83,6 @@ const App = () => {
             <LayoutDashboard size={18} />
             <span className="font-medium">Dashboard</span>
           </button>
-          <button onClick={() => setActiveNav('geo')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'geo' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
-            <Map size={18} />
-            <span className="font-medium">Geospatial</span>
-          </button>
           <button onClick={() => setActiveNav('queue')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'queue' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
             <Inbox size={18} />
             <span className="font-medium">Discovery Queue</span>
@@ -96,11 +91,11 @@ const App = () => {
             <BarChart3 size={18} />
             <span className="font-medium">GA4 Backtest</span>
           </button>
-          <div className="flex items-center gap-3 px-4 py-3 text-slate-400 hover:bg-slate-800/30 hover:text-slate-200 rounded-lg cursor-pointer transition-colors">
+          <button onClick={() => setActiveNav('alerts')} className={`flex items-center gap-3 px-4 py-3 w-full rounded-lg transition-colors ${activeNav === 'alerts' ? 'bg-slate-800/50 text-white border border-slate-700 shadow-sm' : 'text-slate-400 hover:bg-slate-800/30 hover:text-slate-200'}`}>
             <Bell size={18} />
             <span className="font-medium">Alerts</span>
-            <span className="ml-auto bg-red-500/20 text-red-400 text-xs py-0.5 px-2 rounded-full border border-red-500/20">{activeAlerts}</span>
-          </div>
+            {activeAlerts > 0 && <span className="ml-auto bg-red-500/20 text-red-400 text-xs py-0.5 px-2 rounded-full border border-red-500/20">{activeAlerts}</span>}
+          </button>
         </nav>
 
         <div className="p-4 border-t border-slate-800">
@@ -226,26 +221,26 @@ const App = () => {
            {activeNav === 'dashboard' && (<>
            {/* KPI Cards */}
            {(trends.length > 0 || activeSearch) && (
-           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                   <div className="text-slate-400 text-xs font-medium uppercase">{activeSearch ? 'Search Results' : 'Tracked Terms'}</div>
+                   <div className="text-slate-400 text-xs font-medium uppercase" title="Total number of food trends currently being tracked and scored">{activeSearch ? 'Search Results' : 'Tracked Terms'}</div>
                    <div className="text-2xl font-bold text-white mt-1">{trends.length}</div>
                    <div className="text-xs text-emerald-400 mt-1">
                      {activeSearch ? `"${activeSearch}"` : 'Live'}{activeZip ? ` | ZIP ${activeZip}` : ''}
                    </div>
                </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">High Probability Breakouts</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase" title="Trends where the model predicts &gt;70% chance of surging in the next 4–8 weeks">High Probability Breakouts</div>
                   <div className="text-2xl font-bold text-emerald-400 mt-1">{trends.filter(t => t.breakoutProbability > 70).length}</div>
                   <div className="text-xs text-slate-500 mt-1">Probability &gt; 70%</div>
               </div>
                <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                   <div className="text-slate-400 text-xs font-medium uppercase">Avg Demand Gap</div>
+                   <div className="text-slate-400 text-xs font-medium uppercase" title="Average unmet demand score — high demand with low local supply = opportunity">Avg Demand Gap</div>
                    <div className="text-2xl font-bold text-orange-400 mt-1">{trends.length > 0 ? Math.round(trends.reduce((a, t) => a + (t.gapScore ?? t.unmetDemandScore), 0) / trends.length) : 0}/100</div>
                    <div className="text-xs text-slate-500 mt-1">Regional Average</div>
                </div>
               <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
-                  <div className="text-slate-400 text-xs font-medium uppercase">Your Website Traffic</div>
+                  <div className="text-slate-400 text-xs font-medium uppercase" title="Signal strength of your own GA4 site traffic for tracked food terms">Your Website Traffic</div>
                   {(() => {
                     const trafficSignals = trends.flatMap(t => t.signals.filter(s => s.platform === 'OwnTraffic' && s.currentIntensity > 0));
                     if (trafficSignals.length === 0) return (
@@ -258,6 +253,13 @@ const App = () => {
                       <div className="text-xs text-slate-500 mt-1">{trafficSignals.length} term{trafficSignals.length > 1 ? 's' : ''} with GA4 traffic</div></>
                     );
                   })()}
+              </div>
+              <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
+                  <div className="text-slate-400 text-xs font-medium uppercase" title="When signal data was last fetched and scored for this session">Data Freshness</div>
+                  <div className="text-lg font-bold text-slate-300 mt-1">
+                    {lastRefresh ? lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">Scores update daily 2 AM UTC</div>
               </div>
            </div>
            )}
@@ -285,9 +287,48 @@ const App = () => {
                           <Suspense fallback={<div className="h-[300px] rounded-lg border border-slate-700 bg-slate-800/50 flex items-center justify-center text-slate-500 text-sm">Loading propagation graph...</div>}>
                             <PropagationGraph trends={trends} />
                           </Suspense>
-                          <Suspense fallback={<div className="h-[400px] rounded-lg border border-slate-700 bg-slate-800/50 flex items-center justify-center text-slate-500 text-sm">Loading map...</div>}>
-                            <GeoMap trends={trends} />
-                          </Suspense>
+                          {/* Top Opportunities card — replaces geo map */}
+                          <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4 h-[300px] overflow-y-auto">
+                            <h3 className="text-sm font-medium text-slate-200 mb-3 flex items-center gap-2">
+                              <TrendingUp size={15} className="text-emerald-400" />
+                              Top Opportunities Right Now
+                            </h3>
+                            <div className="space-y-3">
+                              {[...trends]
+                                .sort((a, b) => (b.gapScore ?? b.unmetDemandScore) - (a.gapScore ?? a.unmetDemandScore))
+                                .slice(0, 5)
+                                .map(t => {
+                                  const gap = t.gapScore ?? t.unmetDemandScore;
+                                  const stateColors: Record<string, string> = { PRE_PEAK: 'text-emerald-400', AT_PEAK: 'text-amber-400', POST_PEAK: 'text-slate-500' };
+                                  const stateLabels: Record<string, string> = { PRE_PEAK: 'Entry Window', AT_PEAK: 'Act Now', POST_PEAK: 'Saturating' };
+                                  return (
+                                    <div
+                                      key={t.id}
+                                      className="flex items-start gap-3 pb-3 border-b border-slate-700/50 last:border-0 last:pb-0 cursor-pointer hover:bg-slate-700/20 rounded px-1 -mx-1 transition-colors"
+                                      onClick={() => setSelectedTrend(t)}
+                                    >
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-sm font-medium text-white truncate">{t.term}</span>
+                                          {t.trendState && stateLabels[t.trendState] && (
+                                            <span className={`text-[10px] font-semibold shrink-0 ${stateColors[t.trendState]}`}>{stateLabels[t.trendState]}</span>
+                                          )}
+                                        </div>
+                                        <div className="text-[10px] text-slate-500 mt-0.5">
+                                          {t.funnelData?.dropoffStage === 'no_page' ? 'No page on site · ' : t.funnelData?.dropoffStage === 'low_conversion' ? 'Low CVR · ' : ''}
+                                          Gap {gap} · {t.neighborhood}
+                                        </div>
+                                      </div>
+                                      <div className="text-right shrink-0">
+                                        <div className={`text-sm font-bold ${t.breakoutProbability > 70 ? 'text-emerald-400' : 'text-yellow-400'}`}>{t.breakoutProbability}%</div>
+                                        <div className="text-[10px] text-slate-500">breakout</div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              {trends.length === 0 && <p className="text-xs text-slate-500">No tracked terms yet.</p>}
+                            </div>
+                          </div>
                         </>
                       )}
                   </div>
@@ -363,18 +404,59 @@ const App = () => {
            </div>
            </>)}
 
-           {activeNav === 'geo' && (
-             <div className="h-full">
-               <h2 className="text-xl font-bold text-white mb-4">Geospatial View</h2>
-                {loading ? (
-                  <div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>
-                ) : (
-                  <Suspense fallback={<div className="h-96 flex items-center justify-center text-slate-500"><Loader2 className="animate-spin" size={32} /></div>}>
-                    <GeoMap trends={trends} />
-                  </Suspense>
-                )}
-              </div>
-            )}
+           {activeNav === 'alerts' && (
+             <div className="max-w-3xl">
+               <div className="flex items-center justify-between mb-4">
+                 <h2 className="text-xl font-bold text-white">Alerts</h2>
+                 <span className="text-xs text-slate-500">Terms with breakout probability &gt; 75%</span>
+               </div>
+               {loading ? (
+                 <div className="flex items-center justify-center py-16 text-slate-500"><Loader2 className="animate-spin mr-2" size={20} /> Loading...</div>
+               ) : trends.filter((t: TrendEntity) => t.breakoutProbability > 75).length === 0 ? (
+                 <div className="bg-slate-800/30 border border-slate-700 border-dashed rounded-xl p-10 text-center">
+                   <Bell size={28} className="mx-auto mb-3 text-slate-600" />
+                   <p className="text-sm text-slate-400">No terms above 75% breakout probability right now.</p>
+                   <p className="text-xs text-slate-500 mt-1">Check back after the next daily score update (2 AM UTC).</p>
+                 </div>
+               ) : (
+                 <div className="space-y-3">
+                   {[...trends]
+                     .filter(t => t.breakoutProbability > 75)
+                     .sort((a, b) => b.breakoutProbability - a.breakoutProbability)
+                     .map(t => {
+                       const gap = t.gapScore ?? t.unmetDemandScore;
+                       const stateColors: Record<string, string> = { PRE_PEAK: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', AT_PEAK: 'bg-amber-500/15 text-amber-400 border-amber-500/30', POST_PEAK: 'bg-slate-500/20 text-slate-400 border-slate-500/30' };
+                       const stateLabels: Record<string, string> = { PRE_PEAK: 'Entry Window', AT_PEAK: 'Act Now', POST_PEAK: 'Saturating' };
+                       return (
+                         <div
+                           key={t.id}
+                           className="flex items-center gap-4 bg-slate-800/50 border border-slate-700 rounded-lg px-5 py-4 cursor-pointer hover:bg-slate-700/40 transition-colors"
+                           onClick={() => setSelectedTrend(t)}
+                         >
+                           <div className="flex-1 min-w-0">
+                             <div className="flex items-center gap-2 mb-1">
+                               <span className="text-base font-semibold text-white">{t.term}</span>
+                               {t.trendState && stateLabels[t.trendState] && (
+                                 <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${stateColors[t.trendState]}`}>{stateLabels[t.trendState]}</span>
+                               )}
+                             </div>
+                             <p className="text-xs text-slate-400">
+                               Gap score {gap}/100 · {t.neighborhood}
+                               {t.funnelData?.dropoffStage === 'no_page' ? ' · No page on site yet' : t.funnelData?.dropoffStage === 'low_conversion' ? ' · Page converts poorly' : ''}
+                             </p>
+                             {t.trendStateNarrative && <p className="text-xs text-indigo-300 italic mt-1">{t.trendStateNarrative}</p>}
+                           </div>
+                           <div className="text-right shrink-0">
+                             <div className="text-2xl font-bold text-emerald-400">{t.breakoutProbability}%</div>
+                             <div className="text-[10px] text-slate-500">breakout prob.</div>
+                           </div>
+                         </div>
+                       );
+                     })}
+                 </div>
+               )}
+             </div>
+           )}
 
         </div>
       </main>

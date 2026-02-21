@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { TrendEntity, AnalysisResult } from '../types';
 import { analyzeTrendWithGemini } from '../services/geminiService';
-import { X, BrainCircuit, Loader2, FileText, Copy, Check, TrendingUp } from 'lucide-react';
+import { X, BrainCircuit, Loader2, FileText, Copy, Check, TrendingUp, ChevronDown } from 'lucide-react';
 import { TrendTimeSeries } from './Visualizations';
 import { FunnelPanel } from './FunnelPanel';
 import { getAdminHeaders } from '../services/adminAuth';
@@ -42,6 +42,7 @@ interface TrendDetailProps {
 }
 
 export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
+  const [showScoreExplainer, setShowScoreExplainer] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<PageDraft | null>(null);
@@ -142,6 +143,39 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
+          {/* Score explainer */}
+          <div className="rounded-lg border border-slate-700/60 overflow-hidden">
+            <button
+              onClick={() => setShowScoreExplainer(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-800/40 hover:bg-slate-800/70 text-xs text-slate-400 transition-colors"
+            >
+              <span className="font-medium">How to read these scores</span>
+              <ChevronDown size={14} className={`transition-transform ${showScoreExplainer ? 'rotate-180' : ''}`} />
+            </button>
+            {showScoreExplainer && (
+              <div className="px-4 py-3 bg-slate-900/40">
+                <table className="w-full text-xs">
+                  <tbody className="divide-y divide-slate-700/40">
+                    {[
+                      { score: 'Intent', color: 'text-blue-400', def: 'Consumer demand signal — search queries, social mentions, and site searches for this food term.', guide: '> 60 = strong demand; < 30 = niche.' },
+                      { score: 'Availability', color: 'text-slate-300', def: 'Local supply density — how many active competitors offer this in your market.', guide: '< 30 = underserved; > 70 = saturated.' },
+                      { score: 'Gap', color: 'text-red-400', def: 'Unmet demand = Intent minus Availability. High gap means demand exceeds local supply.', guide: '> 50 = strong opportunity; > 70 = priority.' },
+                      { score: 'Realization', color: 'text-violet-300', def: 'Signal quality — how much of the demand has translated to your own website traffic.', guide: 'Low = opportunity not captured yet.' },
+                      { score: 'Confidence', color: 'text-amber-300', def: 'Data coverage — how many independent signal sources agree. More sources = higher confidence.', guide: '> 60 = reliable; < 40 = preliminary.' },
+                      { score: 'Breakout %', color: 'text-emerald-400', def: 'Predicted probability this term will surge in the next 4–8 weeks, based on historical velocity.', guide: '> 70 = act now; 40–70 = monitor closely.' },
+                    ].map(({ score, color, def, guide }) => (
+                      <tr key={score} className="align-top">
+                        <td className={`py-2 pr-3 font-medium w-24 shrink-0 ${color}`}>{score}</td>
+                        <td className="py-2 pr-3 text-slate-300">{def}</td>
+                        <td className="py-2 text-slate-500 italic">{guide}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           {/* Stats Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
@@ -196,7 +230,7 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                   OwnTraffic: 'Your GA4 Traffic', OwnSales: 'Your Square Sales',
                   GA4Backtest: 'GA4 Backtest',
                   ConversationalSearch: 'Near-Me Search', LocalRedditIntent: 'Local Questions',
-                  MetaAds: 'Meta Ads', RedditPushshift: 'Reddit Archive',
+                  MetaAds: 'Meta Ads', InstagramOrganic: 'Instagram Organic', RedditPushshift: 'Reddit Archive',
                   YouTube: 'YouTube', GoogleNews: 'Google News', GoogleMaps: 'Google Maps Supply',
                 };
                 const colors: Record<string, string> = {
@@ -204,7 +238,7 @@ export const TrendDetail: React.FC<TrendDetailProps> = ({ trend, onClose }) => {
                   TikTok: 'text-cyan-400', Pinterest: 'text-pink-400', OwnTraffic: 'text-violet-400',
                   OwnSales: 'text-emerald-400', GA4Backtest: 'text-amber-400', DoorDash: 'text-red-500',
                   ConversationalSearch: 'text-violet-400', LocalRedditIntent: 'text-orange-400',
-                  MetaAds: 'text-blue-500', YouTube: 'text-red-500', GoogleNews: 'text-blue-300',
+                  MetaAds: 'text-blue-500', InstagramOrganic: 'text-pink-300', YouTube: 'text-red-500', GoogleNews: 'text-blue-300',
                   GoogleMaps: 'text-green-400',
                 };
                 return (
